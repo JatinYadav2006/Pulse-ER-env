@@ -6,6 +6,7 @@
 
 """Pulse Physiology Env environment server components."""
 
+from .pulse_engine_adapter import PulseEngineAdapter
 from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
 
-__all__ = ["PulsePhysiologyEnvironment"]
+__all__ = ["PulseEngineAdapter", "PulsePhysiologyEnvironment"]

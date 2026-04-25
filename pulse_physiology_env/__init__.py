@@ -8,8 +8,18 @@
 
 from .client import PulsePhysiologyEnv
 from .models import PulsePhysiologyAction, PulsePhysiologyObservation
+from .patient_state import (
+    ArterialBloodGasResult,
+    BasicMetabolicPanelResult,
+    CompleteBloodCountResult,
+    PatientState,
+)
 
 __all__ = [
+    "ArterialBloodGasResult",
+    "BasicMetabolicPanelResult",
+    "CompleteBloodCountResult",
+    "PatientState",
     "PulsePhysiologyAction",
     "PulsePhysiologyObservation",
     "PulsePhysiologyEnv",
