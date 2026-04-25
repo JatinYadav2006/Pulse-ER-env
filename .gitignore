@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Ignore compiled build artifacts
 engine-build/install/bin/
 engine-build/CMakeFiles/
@@ -13,3 +14,18 @@ engine-build/**/*.a
 
 # But NOT the python API - let that through
 !engine-build/install/python/
+=======
+# Ignore engine and build folders
+engine/
+engine-build/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# VS / IDE
+.vs/
+*.user
+*.suo
+>>>>>>> 9122521c54082b4d10962a6f490e4bd6c1f9041e
