@@ -84,6 +84,14 @@ def _mean_arterial_pressure(observation: PulsePhysiologyObservation) -> float | 
     return (observation.systolic_bp_mmhg + (2 * observation.diastolic_bp_mmhg)) / 3
 
 
+def _spo2_percent(observation: PulsePhysiologyObservation) -> float | None:
+    """Return oxygen saturation as a human-readable percentage when available."""
+
+    if observation.spo2 is None:
+        return None
+    return round(observation.spo2 * 100, 1)
+
+
 def _vital_value(observation: PulsePhysiologyObservation, vital_name: str) -> float | None:
     """Resolve one vital from an observation, including derived MAP support."""
 
@@ -328,6 +336,27 @@ def recommend_next_step(observation: PulsePhysiologyObservation) -> NextStepReco
     alerts = set(observation.active_alerts)
     available_tools = set(observation.available_tools)
     risk_level = _risk_level(observation)
+    mean_arterial_pressure = _mean_arterial_pressure(observation)
+
+    if (
+        {"possible_tension_pneumothorax", "unilateral_absent_breath_sounds"} & alerts
+        and "needle_decompression" in available_tools
+    ):
+        return NextStepRecommendation(
+            scenario_id=observation.scenario_id,
+            risk_level=risk_level,
+            recommended_tool="needle_decompression",
+            rationale="The current alert pattern suggests tension physiology, so decompression is the highest-yield immediate action.",
+            alternatives=[tool for tool in ("get_respiratory_status", "airway_support", "give_oxygen") if tool in available_tools],
+        )
+    if "possible_cardiac_tamponade" in alerts and "pericardiocentesis" in available_tools:
+        return NextStepRecommendation(
+            scenario_id=observation.scenario_id,
+            risk_level=risk_level,
+            recommended_tool="pericardiocentesis",
+            rationale="Possible tamponade physiology is present, so pericardial drainage is the most direct next step.",
+            alternatives=[tool for tool in ("give_fluids", "give_pressor", "check_deterioration") if tool in available_tools],
+        )
 
     if "blood_loss" in alerts and "control_bleeding" in available_tools:
         return NextStepRecommendation(
@@ -350,6 +379,19 @@ def recommend_next_step(observation: PulsePhysiologyObservation) -> NextStepReco
             rationale="Persistent tachycardia after initial hemorrhage control suggests the patient may still benefit from additional perfusion support.",
             alternatives=[tool for tool in ("check_deterioration", "summarize_state", "advance_time") if tool in available_tools],
         )
+    if (
+        mean_arterial_pressure is not None
+        and mean_arterial_pressure < 65
+        and observation.active_infusions
+        and "give_pressor" in available_tools
+    ):
+        return NextStepRecommendation(
+            scenario_id=observation.scenario_id,
+            risk_level=risk_level,
+            recommended_tool="give_pressor",
+            rationale="Perfusion remains low despite active infusions, so vasopressor support is a reasonable escalation.",
+            alternatives=[tool for tool in ("give_fluids", "check_deterioration", "get_blood_gas") if tool in available_tools],
+        )
     if "hypotension" in alerts and "give_fluids" in available_tools:
         return NextStepRecommendation(
             scenario_id=observation.scenario_id,
@@ -368,6 +410,14 @@ def recommend_next_step(observation: PulsePhysiologyObservation) -> NextStepReco
             rationale="Hypoxemia is active and oxygen support is the fastest way to improve oxygenation.",
             alternatives=[tool for tool in ("airway_support", "position_patient", "check_deterioration") if tool in available_tools],
         )
+    if "hypoxemia" in alerts and "get_respiratory_status" in available_tools:
+        return NextStepRecommendation(
+            scenario_id=observation.scenario_id,
+            risk_level=risk_level,
+            recommended_tool="get_respiratory_status",
+            rationale="A focused respiratory reassessment can clarify whether the next move should be oxygen, airway support, or decompression.",
+            alternatives=[tool for tool in ("give_oxygen", "airway_support", "position_patient") if tool in available_tools],
+        )
     if "tachypnea" in alerts and "airway_support" in available_tools:
         return NextStepRecommendation(
             scenario_id=observation.scenario_id,
@@ -377,6 +427,15 @@ def recommend_next_step(observation: PulsePhysiologyObservation) -> NextStepReco
             rationale="Respiratory effort remains elevated and airway support may prevent further deterioration.",
             alternatives=[tool for tool in ("give_oxygen", "position_patient", "check_deterioration") if tool in available_tools],
         )
+    for diagnostic_tool in ("get_blood_gas", "get_cbc", "get_bmp"):
+        if diagnostic_tool in available_tools and diagnostic_tool in observation.ready_diagnostics:
+            return NextStepRecommendation(
+                scenario_id=observation.scenario_id,
+                risk_level=risk_level,
+                recommended_tool=diagnostic_tool,
+                rationale="A diagnostic result is ready and should be reviewed before the next intervention sequence.",
+                alternatives=[tool for tool in ("summarize_state", "check_deterioration", "get_vitals") if tool in available_tools],
+            )
     if "check_deterioration" in available_tools:
         return NextStepRecommendation(
             scenario_id=observation.scenario_id,
@@ -405,7 +464,7 @@ def build_triage_summary(observation: PulsePhysiologyObservation) -> TriageSumma
         f"{observation.scenario_id}: {acuity.upper()} acuity with "
         f"HR {observation.heart_rate_bpm:.0f}, "
         f"BP {observation.systolic_bp_mmhg:.0f}/{observation.diastolic_bp_mmhg:.0f}, "
-        f"SpO2 {observation.spo2:.2f}, "
+        f"SpO2 {_spo2_percent(observation):.1f}%, "
         f"mental status {mental_status}."
     )
     return TriageSummary(
@@ -418,6 +477,7 @@ def build_triage_summary(observation: PulsePhysiologyObservation) -> TriageSumma
             "systolic_bp_mmhg": observation.systolic_bp_mmhg,
             "diastolic_bp_mmhg": observation.diastolic_bp_mmhg,
             "spo2": observation.spo2,
+            "spo2_percent": _spo2_percent(observation),
             "respiration_rate_bpm": observation.respiration_rate_bpm,
             "blood_volume_ml": observation.blood_volume_ml,
         },

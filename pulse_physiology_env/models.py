@@ -25,7 +25,7 @@ from .patient_state import (
     PatientState,
     ScenarioDifficulty,
 )
-from .tool_catalog import INITIAL_TOOL_NAMES
+from .tool_catalog import EXTENDED_TOOL_NAMES, INITIAL_TOOL_NAMES, KNOWN_TOOL_NAMES
 
 
 class PulsePhysiologyAction(Action):
@@ -72,7 +72,7 @@ class ObservationMetadata(BaseModel):
 
     step_count: int = Field(default=0, ge=0, description="Episode step count")
     available_tools: list[str] = Field(
-        default_factory=lambda: list(INITIAL_TOOL_NAMES),
+        default_factory=lambda: list(KNOWN_TOOL_NAMES),
         description="Tools the environment currently exposes",
     )
 

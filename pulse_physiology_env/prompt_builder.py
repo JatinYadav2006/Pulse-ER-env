@@ -25,6 +25,7 @@ def observation_snapshot(observation: PulsePhysiologyObservation) -> dict[str, A
         "systolic_bp_mmhg": observation.systolic_bp_mmhg,
         "diastolic_bp_mmhg": observation.diastolic_bp_mmhg,
         "spo2": observation.spo2,
+        "spo2_percent": round(observation.spo2 * 100, 1) if observation.spo2 is not None else None,
         "respiration_rate_bpm": observation.respiration_rate_bpm,
         "blood_volume_ml": observation.blood_volume_ml,
         "mental_status": _mental_status_value(observation.mental_status),

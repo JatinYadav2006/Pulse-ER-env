@@ -71,6 +71,9 @@ class EpisodeTrace:
             "systolic_bp_mmhg": self.final_observation.systolic_bp_mmhg,
             "diastolic_bp_mmhg": self.final_observation.diastolic_bp_mmhg,
             "spo2": self.final_observation.spo2,
+            "spo2_percent": round(self.final_observation.spo2 * 100, 1)
+            if self.final_observation.spo2 is not None
+            else None,
             "respiration_rate_bpm": self.final_observation.respiration_rate_bpm,
             "blood_volume_ml": self.final_observation.blood_volume_ml,
             "mental_status": mental_status_value,
@@ -88,6 +91,21 @@ class EpisodeRunner:
     max_retry_attempts: int = 3
     retry_backoff_s: float = 0.01
 
+    @staticmethod
+    def _is_terminal_observation(observation: PulsePhysiologyObservation) -> bool:
+        """Detect terminal physiology from the observation even before `done` is set.
+
+        The real Pulse runtime may surface cardiac-arrest state through alerts
+        before a subsequent tool call flips `done=True`. Detecting that here
+        avoids wasting retry attempts or extra advance-time calls in obviously
+        terminal states.
+        """
+
+        if observation.done:
+            return True
+        active_alerts = set(observation.active_alerts or [])
+        return "cardiac_arrest" in active_alerts
+
     def run(self, policy: Policy, scenario_id: str) -> EpisodeTrace:
         """Execute one episode and capture its trajectory."""
 
@@ -101,7 +119,7 @@ class EpisodeRunner:
         remaining_action_budget = self.action_budget
         termination_reason = EpisodeTerminationReason.MAX_TIMESTEPS
 
-        if current_observation.done:
+        if self._is_terminal_observation(current_observation):
             termination_reason = EpisodeTerminationReason.PATIENT_DEATH
 
         for step_index in range(self.max_steps):
@@ -109,7 +127,11 @@ class EpisodeRunner:
                 events.append("Action budget exhausted before the next decision could be made.")
                 termination_reason = EpisodeTerminationReason.BUDGET_EXHAUSTED
                 break
-            if current_observation.done:
+            if self._is_terminal_observation(current_observation):
+                if "cardiac_arrest" in set(current_observation.active_alerts or []):
+                    events.append(
+                        "Terminal physiology detected from observation state; ending episode without another backend step."
+                    )
                 termination_reason = EpisodeTerminationReason.PATIENT_DEATH
                 break
 
@@ -132,7 +154,11 @@ class EpisodeRunner:
             steps.append(self._to_step(step_index, action, result))
             current_observation = result.observation
 
-            if result.done:
+            if self._is_terminal_observation(current_observation):
+                if "cardiac_arrest" in set(current_observation.active_alerts or []):
+                    events.append(
+                        "Terminal physiology detected after step result; ending episode without further retries."
+                    )
                 termination_reason = EpisodeTerminationReason.PATIENT_DEATH
                 break
 
@@ -152,7 +178,7 @@ class EpisodeRunner:
             termination_reason = EpisodeTerminationReason.MAX_TIMESTEPS
 
         return EpisodeTrace(
-            scenario_id=scenario_id,
+            scenario_id=reset_result.observation.scenario_id,
             policy_name=policy.name,
             initial_observation=reset_result.observation,
             steps=tuple(steps),
@@ -173,6 +199,11 @@ class EpisodeRunner:
         result: EnvironmentResponse | None = None
         for attempt_index in range(1, self.max_retry_attempts + 1):
             result = self.backend.step(action)
+            if self._is_terminal_observation(result.observation):
+                events.append(
+                    f"Terminal physiology detected after {action.tool_name}; skipping further retries."
+                )
+                return result
             if result.error is None or not result.error.retryable:
                 return result
 

@@ -140,7 +140,7 @@ def print_summary(summary: dict) -> None:
         "  vitals:"
         f" HR {summary['heart_rate_bpm']:.1f},"
         f" BP {summary['systolic_bp_mmhg']:.1f}/{summary['diastolic_bp_mmhg']:.1f},"
-        f" SpO2 {summary['spo2']:.3f},"
+        f" SpO2 {summary['spo2'] * 100:.1f}%,"
         f" RR {summary['respiration_rate_bpm']:.1f}"
     )
     print(f"  blood_volume_ml: {summary['blood_volume_ml']}")

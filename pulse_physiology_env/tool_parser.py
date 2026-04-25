@@ -8,7 +8,7 @@ import warnings
 from typing import Any
 
 from .models import ToolAction
-from .tool_catalog import INITIAL_TOOL_NAMES, ToolValidationError, validate_tool_arguments
+from .tool_catalog import KNOWN_TOOL_NAMES, ToolValidationError, validate_tool_arguments
 
 
 class ToolParseError(ValueError):
@@ -141,7 +141,7 @@ def parse_tool_action(
     if reasoning is not None and not isinstance(reasoning, str):
         raise ParseError(_format_parse_error("reasoning must be a string when provided.", text))
 
-    valid_tools = allowed_tools or list(INITIAL_TOOL_NAMES)
+    valid_tools = allowed_tools or list(KNOWN_TOOL_NAMES)
     try:
         normalized_arguments = validate_tool_arguments(
             tool_name,

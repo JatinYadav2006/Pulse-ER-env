@@ -40,10 +40,10 @@ class PolicyScore:
         return round(sum(self.per_scenario.values()) / len(self.per_scenario), 3)
 
 
-def _make_observation(*, available_tools: list[str]) -> PulsePhysiologyObservation:
+def _make_observation(*, available_tools: list[str], **overrides) -> PulsePhysiologyObservation:
     """Create a compact observation fixture for consumer-side regression checks."""
 
-    return PulsePhysiologyObservation(
+    payload = dict(
         scenario_id="baseline_stable",
         patient_id="regression_patient",
         sim_time_s=0.0,
@@ -55,6 +55,8 @@ def _make_observation(*, available_tools: list[str]) -> PulsePhysiologyObservati
         blood_volume_ml=5500.0,
         available_tools=available_tools,
     )
+    payload.update(overrides)
+    return PulsePhysiologyObservation(**payload)
 
 
 def _make_response(
@@ -175,6 +177,64 @@ class _MissingToolsBackend:
         return self._state
 
 
+class _TerminalRetryBackend:
+    """Backend stub that surfaces cardiac arrest with a retryable error once."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self._state = PatientState(
+            scenario_id="baseline_stable",
+            patient_id="terminal_retry_backend",
+            heart_rate_bpm=20.0,
+            systolic_bp_mmhg=40.0,
+            diastolic_bp_mmhg=20.0,
+            spo2=0.7,
+            respiration_rate_bpm=4.0,
+            blood_volume_ml=3000.0,
+            mental_status="unresponsive",
+            active_alerts=["cardiac_arrest"],
+        )
+
+    def reset(self, scenario_id: str | None = None) -> EnvironmentResponse:
+        observation = PulsePhysiologyObservation.from_patient_state(
+            self._state.model_copy(update={"active_alerts": [], "done": False}),
+            reward=0.0,
+            available_tools=["advance_time"],
+            metadata={"step_count": 0, "available_tools": ["advance_time"]},
+        )
+        return _make_response(observation, reward=0.0)
+
+    def step(self, tool_action) -> EnvironmentResponse:
+        self.attempts += 1
+        observation = PulsePhysiologyObservation.from_patient_state(
+            self._state.model_copy(update={"done": False}),
+            reward=-9.0,
+            available_tools=["advance_time"],
+            error=ToolError(
+                code="ENGINE_ERROR",
+                message="Cardiac arrest prevents further simulation advance.",
+                retryable=True,
+            ),
+            tool_result=ToolResult(
+                tool_name=tool_action.tool_name,
+                success=False,
+                message="Terminal arrest reached.",
+                state_changed=True,
+                changed_fields=["active_alerts"],
+            ),
+            metadata={"step_count": 1, "available_tools": ["advance_time"]},
+        )
+        return _make_response(
+            observation,
+            reward=-9.0,
+            error=observation.error,
+            tool_result=observation.tool_result,
+        )
+
+    def get_state(self) -> PatientState:
+        return self._state
+
+
 def _regression_check_retryable_runner_behavior() -> None:
     """Ensure retryable backend failures do not terminate the episode immediately."""
 
@@ -219,6 +279,26 @@ def _regression_check_available_tools_fail_closed() -> None:
         raise SystemExit("Episode runner regression: missing available_tools should terminate before any step runs.")
 
 
+def _regression_check_terminal_retry_short_circuit() -> None:
+    """Ensure cardiac-arrest observations stop retry loops immediately."""
+
+    backend = _TerminalRetryBackend()
+    runner = EpisodeRunner(
+        backend=backend,
+        max_steps=4,
+        max_retry_attempts=3,
+        retry_backoff_s=0.0,
+    )
+    trace = runner.run(policy=_FixedActionPolicy("advance_time"), scenario_id="baseline_stable")
+
+    if backend.attempts != 1:
+        raise SystemExit("Episode runner regression: terminal observations should short-circuit retry loops.")
+    if trace.termination_reason != EpisodeTerminationReason.PATIENT_DEATH:
+        raise SystemExit("Episode runner regression: terminal observation should map to patient_death.")
+    if not any("Terminal physiology detected" in event for event in trace.events):
+        raise SystemExit("Episode runner regression: terminal short-circuit should be logged.")
+
+
 def _regression_check_tool_parser_hierarchy() -> None:
     """Ensure parser extraction prefers schema-aware JSON candidates over greedy braces."""
 
@@ -247,6 +327,49 @@ def _regression_check_tool_parser_hierarchy() -> None:
 
     if not any(isinstance(warning.message, ParseWarning) for warning in caught):
         raise SystemExit("Tool parser regression: fallback parsing must emit ParseWarning.")
+
+
+def _regression_check_real_expert_heuristics() -> None:
+    """Ensure the adaptive real expert prioritizes decompression and targeted hemorrhage control."""
+
+    available_tools = [
+        "get_vitals",
+        "check_deterioration",
+        "needle_decompression",
+        "control_bleeding",
+        "give_fluids",
+        "give_pressor",
+        "give_oxygen",
+        "advance_time",
+    ]
+    observation = _make_observation(
+        available_tools=available_tools,
+        scenario_id="polytrauma_demo",
+        breath_sounds="absent left",
+        spo2=0.89,
+        systolic_bp_mmhg=82.0,
+        diastolic_bp_mmhg=54.0,
+        mean_arterial_pressure_mmhg=63.0,
+        active_alerts=["active_hemorrhage", "shock_index_elevated"],
+        active_hemorrhages={"right_leg": 140.0, "spleen": 45.0},
+    )
+
+    expert = build_expert_policy()
+    expert.reset("polytrauma_demo")
+    first_action = expert.select_action(observation)
+    if first_action.tool_name != "get_vitals":
+        raise SystemExit("Expert regression: real trauma policy should start with get_vitals.")
+
+    expert.observe_outcome(first_action, _make_response(observation, reward=0.0))
+    second_action = expert.select_action(observation)
+    if second_action.tool_name != "needle_decompression" or second_action.arguments.get("side") != "left":
+        raise SystemExit("Expert regression: real trauma policy should prioritize left needle decompression.")
+
+    observation_after_needle = observation.model_copy(update={"breath_sounds": "present bilateral"})
+    expert.observe_outcome(second_action, _make_response(observation_after_needle, reward=0.0))
+    third_action = expert.select_action(observation_after_needle)
+    if third_action.tool_name != "control_bleeding" or third_action.arguments.get("site") != "right_leg":
+        raise SystemExit("Expert regression: real trauma policy should target the highest-flow hemorrhage site.")
 
 
 def score_policy(policy_factory, policy_name: str) -> PolicyScore:
@@ -297,8 +420,12 @@ def main() -> None:
     print("PASS retryable runner handling")
     _regression_check_available_tools_fail_closed()
     print("PASS available_tools fail-closed handling\n")
+    _regression_check_terminal_retry_short_circuit()
+    print("PASS terminal retry short-circuit\n")
     _regression_check_tool_parser_hierarchy()
     print("PASS tool parser hierarchy\n")
+    _regression_check_real_expert_heuristics()
+    print("PASS real expert heuristics\n")
 
     expert = score_policy(lambda scenario_id: build_expert_policy(), "expert")
     llm_demo = score_policy(

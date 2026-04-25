@@ -9,6 +9,10 @@ from .models import PatientState
 
 READ_ONLY_TOOLS = {
     "get_vitals",
+    "get_respiratory_status",
+    "get_blood_gas",
+    "get_cbc",
+    "get_bmp",
     "summarize_state",
     "check_deterioration",
     "recommend_next_step",
