@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 LactateTrend = Literal["improving", "worsening", "stable"]
 MentalStatus = Literal["alert", "verbal", "pain", "unresponsive"]
+ScenarioDifficulty = Literal["easy", "medium", "hard"]
 
 
 class ArterialBloodGasResult(BaseModel):
@@ -91,6 +92,7 @@ class PatientState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scenario_id: str = Field(default="baseline")
+    scenario_difficulty: ScenarioDifficulty = Field(default="medium")
     patient_id: str = Field(default="standard_male")
     sim_time_s: float = Field(default=0.0)
 
@@ -130,7 +132,11 @@ class PatientState(BaseModel):
 
     pending_diagnostics: dict[str, int] = Field(
         default_factory=dict,
-        description="Diagnostic tool name to remaining timesteps.",
+        description="Diagnostic tool name to remaining simulated seconds.",
+    )
+    ready_diagnostics: list[str] = Field(
+        default_factory=list,
+        description="Diagnostics that have completed and can be reviewed immediately.",
     )
     active_infusions: dict[str, float] = Field(
         default_factory=dict,

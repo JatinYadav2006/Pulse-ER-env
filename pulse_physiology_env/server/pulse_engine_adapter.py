@@ -16,6 +16,7 @@ from pulse_physiology_env.patient_state import (
     CompleteBloodCountResult,
     MentalStatus,
     PatientState,
+    ScenarioDifficulty,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -61,11 +62,17 @@ try:
     _BOOTSTRAP_INSTALL_DIR = _bootstrap_pulse_paths()
 
     from pulse.engine.PulseEngine import PulseEngine
+    from pulse.cdm.bag_valve_mask_actions import SEBagValveMaskAutomated, SEBagValveMaskConfiguration
     from pulse.cdm.engine import SEAction, SEDataRequest, SEDataRequestManager, eGate, eSide, eSwitch
+    from pulse.cdm.mechanical_ventilator_actions import (
+        SEMechanicalVentilatorContinuousPositiveAirwayPressure,
+        SEMechanicalVentilatorPressureControl,
+    )
     from pulse.cdm.patient_actions import (
         SEHemorrhage,
         SEIntubation,
         SENeedleDecompression,
+        SEPericardialEffusion,
         SESubstanceCompoundInfusion,
         SESubstanceInfusion,
         SESupplementalOxygen,
@@ -83,6 +90,7 @@ try:
         PressureTimePerVolumeUnit,
         PressureUnit,
         TemperatureUnit,
+        TimeUnit,
         VolumePerPressureUnit,
         VolumePerTimeUnit,
         VolumeUnit,
@@ -93,24 +101,31 @@ except Exception as exc:  # pragma: no cover - exercised only on misconfigured h
 
 def _snake_case(value: str) -> str:
     compact = value.split(".")[-1].strip()
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", compact).replace("__", "_").lower()
+    first_pass = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", compact)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", first_pass).replace("__", "_").lower()
 
 
 @dataclass
 class _RuntimeContext:
     state_file: Path | None = None
     scenario_id: str = "baseline"
+    scenario_difficulty: ScenarioDifficulty = "medium"
     patient_id: str = "standard_male"
     action_budget_remaining: int | None = None
     pending_diagnostics: dict[str, int] = field(default_factory=dict)
+    ready_diagnostics: set[str] = field(default_factory=set)
     active_infusions: dict[str, float] = field(default_factory=dict)
     active_hemorrhages: dict[str, float] = field(default_factory=dict)
     active_tension_pneumothorax_sides: set[str] = field(default_factory=set)
+    pericardial_effusion_rate_ml_per_min: float | None = None
     pain_sources: dict[str, float] = field(default_factory=dict)
     intubation_type: str = "Off"
     patient_position: str = "supine"
     oxygen_device: str | None = None
     oxygen_flow_lpm: float | None = None
+    airway_support_mode: str | None = None
+    fio2: float | None = None
+    peep_cmh2o: float | None = None
     baseline_blood_volume_ml: float | None = None
 
 
@@ -120,6 +135,51 @@ class PulseEngineAdapter:
     DEFAULT_STATE_FILENAME = "StandardMale@0s.json"
     DEFAULT_OXYGEN_SUPPLY_L = 1000.0
     DEFAULT_PATIENT_POSITION = "supine"
+    DEFAULT_BVM_RESPIRATION_RATE_BPM = 12.0
+    DEFAULT_BVM_IE_RATIO = 0.5
+    DEFAULT_BVM_SQUEEZE_PRESSURE_CMH2O = 12.0
+    DEFAULT_BVM_FIO2 = 0.6
+    DEFAULT_CPAP_FIO2 = 0.6
+    DEFAULT_CPAP_PEEP_CMH2O = 5.0
+    DEFAULT_CPAP_PRESSURE_SUPPORT_CMH2O = 5.0
+    DEFAULT_PC_FIO2 = 0.7
+    DEFAULT_PC_PEEP_CMH2O = 5.0
+    DEFAULT_PC_RESPIRATION_RATE_BPM = 14.0
+    DEFAULT_PC_INSPIRATORY_PRESSURE_CMH2O = 16.0
+    DEFAULT_PC_INSPIRATORY_PERIOD_S = 1.0
+    DEFAULT_PRESSOR_MONITOR_SECONDS = 180.0
+    DEFAULT_PERICARDIOCENTESIS_DRAIN_RATE_ML_PER_MIN = 150.0
+    DIAGNOSTIC_DELAYS_S = {
+        "get_blood_gas": 120,
+        "get_cbc": 240,
+        "get_bmp": 300,
+    }
+
+    _AIRWAY_SUPPORT_DISPLAY = {
+        "bag_valve_mask": "bag_valve_mask",
+        "cpap": "cpap",
+        "pressure_control_ventilation": "pressure_control_ventilation",
+    }
+    _FLUID_COMPOUND_MAP = {
+        "saline": "Saline",
+        "blood": "Blood",
+        "packed_rbc": "PackedRBC",
+        "packed_rbcs": "PackedRBC",
+        "prbc": "PackedRBC",
+        "prbcs": "PackedRBC",
+    }
+    _PRESSOR_CONFIG = {
+        "norepinephrine": {
+            "substance": "Norepinephrine",
+            "default_concentration_ug_per_ml": 1.0,
+            "default_rate_ml_per_min": 7.8,
+        },
+        "phenylephrine": {
+            "substance": "Phenylephrine",
+            "default_concentration_ug_per_ml": 10.0,
+            "default_rate_ml_per_min": 7.68,
+        },
+    }
 
     _SODIUM_MOLAR_MASS = 22.98976928
     _POTASSIUM_MOLAR_MASS = 39.0983
@@ -138,6 +198,10 @@ class PulseEngineAdapter:
     _SIDE_MAP = {
         "left": eSide.Left,
         "right": eSide.Right,
+    }
+    _PNEUMOTHORAX_TYPE_MAP = {
+        "open": eGate.Open,
+        "closed": eGate.Closed,
     }
     _HEMORRHAGE_TYPE_MAP = {
         "external": eHemorrhage_Type.External,
@@ -227,6 +291,7 @@ class PulseEngineAdapter:
         state_file: str | Path | None = None,
         *,
         scenario_id: str = "baseline",
+        scenario_difficulty: ScenarioDifficulty = "medium",
         patient_id: str | None = None,
         initial_actions: Sequence[SEAction] | None = None,
         action_budget_remaining: int | None = None,
@@ -248,6 +313,7 @@ class PulseEngineAdapter:
         self._runtime = _RuntimeContext(
             state_file=resolved_state_file,
             scenario_id=scenario_id,
+            scenario_difficulty=scenario_difficulty,
             patient_id=resolved_patient_id,
             action_budget_remaining=(
                 self._default_action_budget_remaining
@@ -265,10 +331,18 @@ class PulseEngineAdapter:
 
         return self.get_full_state()
 
-    def set_scenario_context(self, *, scenario_id: str, patient_id: str | None = None) -> PatientState:
+    def set_scenario_context(
+        self,
+        *,
+        scenario_id: str,
+        scenario_difficulty: ScenarioDifficulty | None = None,
+        patient_id: str | None = None,
+    ) -> PatientState:
         """Update scenario metadata without reloading the engine."""
 
         self._runtime.scenario_id = scenario_id
+        if scenario_difficulty is not None:
+            self._runtime.scenario_difficulty = scenario_difficulty
         if patient_id is not None:
             self._runtime.patient_id = patient_id
         return self.get_full_state()
@@ -311,6 +385,13 @@ class PulseEngineAdapter:
         action.get_volume().set_value(supply_volume_l, VolumeUnit.L)
         return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
 
+    def resolve_fluid_compound(self, fluid_type: str) -> str:
+        fluid_key = fluid_type.strip().lower().replace("-", "_").replace(" ", "_")
+        if fluid_key not in self._FLUID_COMPOUND_MAP:
+            valid = ", ".join(sorted(self._FLUID_COMPOUND_MAP))
+            raise ValueError(f"Unsupported fluid_type '{fluid_type}'. Expected one of: {valid}")
+        return self._FLUID_COMPOUND_MAP[fluid_key]
+
     def infuse_compound(
         self,
         *,
@@ -341,6 +422,227 @@ class PulseEngineAdapter:
             self._runtime.active_infusions.pop(_snake_case(compound), None)
             state = self.get_full_state()
         return state
+
+    def set_pressor(
+        self,
+        *,
+        pressor: str,
+        concentration_ug_per_ml: float | None = None,
+        rate_ml_per_min: float | None = None,
+        advance_time_seconds: float | None = DEFAULT_PRESSOR_MONITOR_SECONDS,
+    ) -> PatientState:
+        """Start, titrate, or stop a vasoactive infusion using Pulse's native drug action."""
+
+        pressor_key = pressor.strip().lower().replace("-", "_").replace(" ", "_")
+        if pressor_key not in self._PRESSOR_CONFIG:
+            valid = ", ".join(sorted(self._PRESSOR_CONFIG))
+            raise ValueError(f"Unsupported pressor '{pressor}'. Expected one of: {valid}")
+
+        config = self._PRESSOR_CONFIG[pressor_key]
+        resolved_concentration = (
+            config["default_concentration_ug_per_ml"]
+            if concentration_ug_per_ml is None
+            else concentration_ug_per_ml
+        )
+        resolved_rate = config["default_rate_ml_per_min"] if rate_ml_per_min is None else rate_ml_per_min
+        if resolved_concentration <= 0:
+            raise ValueError("concentration_ug_per_ml must be greater than zero.")
+        if resolved_rate < 0:
+            raise ValueError("rate_ml_per_min cannot be negative.")
+
+        action = SESubstanceInfusion()
+        action.set_substance(config["substance"])
+        action.get_concentration().set_value(resolved_concentration, MassPerVolumeUnit.ug_Per_mL)
+        action.get_rate().set_value(resolved_rate, VolumePerTimeUnit.mL_Per_min)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def set_pericardial_effusion(
+        self,
+        *,
+        effusion_rate_ml_per_min: float,
+        advance_time_seconds: float | None = 60.0,
+    ) -> PatientState:
+        """Create, stop, or drain pericardial fluid using Pulse's native effusion action."""
+
+        action = SEPericardialEffusion()
+        action.get_effusion_rate().set_value(effusion_rate_ml_per_min, VolumePerTimeUnit.mL_Per_min)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def perform_pericardiocentesis(
+        self,
+        *,
+        drain_rate_ml_per_min: float = DEFAULT_PERICARDIOCENTESIS_DRAIN_RATE_ML_PER_MIN,
+        advance_time_seconds: float | None = 180.0,
+    ) -> PatientState:
+        """Drain pericardial fluid using a negative effusion rate."""
+
+        if drain_rate_ml_per_min <= 0:
+            raise ValueError("drain_rate_ml_per_min must be greater than zero.")
+
+        return self.set_pericardial_effusion(
+            effusion_rate_ml_per_min=-drain_rate_ml_per_min,
+            advance_time_seconds=advance_time_seconds,
+        )
+
+    def apply_bag_valve_mask(
+        self,
+        *,
+        fio2: float | None = None,
+        peep_cmh2o: float | None = None,
+        respiration_rate_bpm: float | None = None,
+        inspiratory_expiratory_ratio: float | None = None,
+        squeeze_pressure_cmh2o: float | None = None,
+        squeeze_volume_ml: float | None = None,
+        airway_adjunct: str | None = None,
+        advance_time_seconds: float | None = 60.0,
+    ) -> PatientState:
+        """Provide bag-valve-mask support following Pulse's native equipment workflow."""
+
+        resolved_fio2 = self.DEFAULT_BVM_FIO2 if fio2 is None else fio2
+        resolved_rate = self.DEFAULT_BVM_RESPIRATION_RATE_BPM if respiration_rate_bpm is None else respiration_rate_bpm
+        resolved_ie_ratio = (
+            self.DEFAULT_BVM_IE_RATIO
+            if inspiratory_expiratory_ratio is None
+            else inspiratory_expiratory_ratio
+        )
+        resolved_pressure = (
+            self.DEFAULT_BVM_SQUEEZE_PRESSURE_CMH2O
+            if squeeze_pressure_cmh2o is None
+            else squeeze_pressure_cmh2o
+        )
+        if not 0.21 <= resolved_fio2 <= 1.0:
+            raise ValueError("fio2 must be between 0.21 and 1.0.")
+        if resolved_rate <= 0:
+            raise ValueError("respiration_rate_bpm must be greater than zero.")
+        if resolved_ie_ratio <= 0:
+            raise ValueError("inspiratory_expiratory_ratio must be greater than zero.")
+        if resolved_pressure <= 0 and squeeze_volume_ml is None:
+            raise ValueError("Provide a positive squeeze pressure or squeeze volume.")
+        if squeeze_volume_ml is not None and squeeze_volume_ml <= 0:
+            raise ValueError("squeeze_volume_ml must be greater than zero when provided.")
+        if peep_cmh2o is not None and peep_cmh2o < 0:
+            raise ValueError("peep_cmh2o cannot be negative.")
+
+        adjunct = airway_adjunct
+        if adjunct is None and not self._is_intubated():
+            adjunct = "oropharyngeal"
+
+        actions: list[SEAction] = []
+        if adjunct:
+            actions.append(self._build_intubation_action(adjunct))
+
+        configuration = SEBagValveMaskConfiguration()
+        bag = configuration.get_configuration()
+        bag.set_connection(eSwitch.On)
+        bag.get_fraction_inspired_gas("Oxygen").get_fraction_amount().set_value(resolved_fio2)
+        if peep_cmh2o is not None:
+            bag.get_valve_positive_end_expired_pressure().set_value(peep_cmh2o, PressureUnit.cmH2O)
+        actions.append(configuration)
+
+        automated = SEBagValveMaskAutomated()
+        automated.get_breath_frequency().set_value(resolved_rate, FrequencyUnit.Per_min)
+        automated.get_inspiratory_expiratory_ratio().set_value(resolved_ie_ratio)
+        if squeeze_volume_ml is not None:
+            automated.get_squeeze_volume().set_value(squeeze_volume_ml, VolumeUnit.mL)
+        else:
+            automated.get_squeeze_pressure().set_value(resolved_pressure, PressureUnit.cmH2O)
+        actions.append(automated)
+        return self.apply_actions(actions, advance_time_seconds=advance_time_seconds)
+
+    def apply_cpap(
+        self,
+        *,
+        fio2: float | None = None,
+        peep_cmh2o: float | None = None,
+        pressure_support_cmh2o: float | None = None,
+        advance_time_seconds: float | None = 120.0,
+    ) -> PatientState:
+        """Provide non-invasive CPAP support through Pulse's mechanical ventilator mode."""
+
+        resolved_fio2 = self.DEFAULT_CPAP_FIO2 if fio2 is None else fio2
+        resolved_peep = self.DEFAULT_CPAP_PEEP_CMH2O if peep_cmh2o is None else peep_cmh2o
+        resolved_support = (
+            self.DEFAULT_CPAP_PRESSURE_SUPPORT_CMH2O
+            if pressure_support_cmh2o is None
+            else pressure_support_cmh2o
+        )
+        if not 0.21 <= resolved_fio2 <= 1.0:
+            raise ValueError("fio2 must be between 0.21 and 1.0.")
+        if resolved_peep < 0:
+            raise ValueError("peep_cmh2o cannot be negative.")
+        if resolved_support < 0:
+            raise ValueError("pressure_support_cmh2o cannot be negative.")
+
+        action = SEMechanicalVentilatorContinuousPositiveAirwayPressure()
+        action.set_connection(eSwitch.On)
+        action.get_fraction_inspired_oxygen().set_value(resolved_fio2)
+        action.get_positive_end_expired_pressure().set_value(resolved_peep, PressureUnit.cmH2O)
+        action.get_delta_pressure_support().set_value(resolved_support, PressureUnit.cmH2O)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def apply_pressure_control_ventilation(
+        self,
+        *,
+        fio2: float | None = None,
+        peep_cmh2o: float | None = None,
+        inspiratory_pressure_cmh2o: float | None = None,
+        respiration_rate_bpm: float | None = None,
+        inspiratory_period_s: float | None = None,
+        advance_time_seconds: float | None = 120.0,
+    ) -> PatientState:
+        """Provide invasive pressure-control ventilation using Pulse's native ventilator action."""
+
+        resolved_fio2 = self.DEFAULT_PC_FIO2 if fio2 is None else fio2
+        resolved_peep = self.DEFAULT_PC_PEEP_CMH2O if peep_cmh2o is None else peep_cmh2o
+        resolved_pressure = (
+            self.DEFAULT_PC_INSPIRATORY_PRESSURE_CMH2O
+            if inspiratory_pressure_cmh2o is None
+            else inspiratory_pressure_cmh2o
+        )
+        resolved_rate = (
+            self.DEFAULT_PC_RESPIRATION_RATE_BPM
+            if respiration_rate_bpm is None
+            else respiration_rate_bpm
+        )
+        resolved_period = (
+            self.DEFAULT_PC_INSPIRATORY_PERIOD_S
+            if inspiratory_period_s is None
+            else inspiratory_period_s
+        )
+        if not 0.21 <= resolved_fio2 <= 1.0:
+            raise ValueError("fio2 must be between 0.21 and 1.0.")
+        if resolved_peep < 0:
+            raise ValueError("peep_cmh2o cannot be negative.")
+        if resolved_pressure <= 0:
+            raise ValueError("inspiratory_pressure_cmh2o must be greater than zero.")
+        if resolved_rate <= 0:
+            raise ValueError("respiration_rate_bpm must be greater than zero.")
+        if resolved_period <= 0:
+            raise ValueError("inspiratory_period_s must be greater than zero.")
+
+        actions: list[SEAction] = [self._build_intubation_action("tracheal")]
+        ventilator = SEMechanicalVentilatorPressureControl()
+        ventilator.set_connection(eSwitch.On)
+        ventilator.get_fraction_inspired_oxygen().set_value(resolved_fio2)
+        ventilator.get_positive_end_expired_pressure().set_value(resolved_peep, PressureUnit.cmH2O)
+        ventilator.get_inspiratory_pressure().set_value(resolved_pressure, PressureUnit.cmH2O)
+        ventilator.get_respiration_rate().set_value(resolved_rate, FrequencyUnit.Per_min)
+        ventilator.get_inspiratory_period().set_value(resolved_period, TimeUnit.s)
+        actions.append(ventilator)
+        return self.apply_actions(actions, advance_time_seconds=advance_time_seconds)
+
+    def order_diagnostic(self, tool_name: str, *, delay_seconds: int | None = None) -> PatientState:
+        """Schedule a delayed diagnostic and return the updated state."""
+
+        if tool_name not in self.DIAGNOSTIC_DELAYS_S:
+            valid = ", ".join(sorted(self.DIAGNOSTIC_DELAYS_S))
+            raise ValueError(f"Unsupported diagnostic '{tool_name}'. Expected one of: {valid}")
+
+        self._runtime.ready_diagnostics.discard(tool_name)
+        self._runtime.pending_diagnostics[tool_name] = int(
+            delay_seconds if delay_seconds is not None else self.DIAGNOSTIC_DELAYS_S[tool_name]
+        )
+        return self.get_full_state()
 
     def set_hemorrhage(
         self,
@@ -384,6 +686,7 @@ class PulseEngineAdapter:
         side: str,
         *,
         severity: float,
+        pneumothorax_type: str = "closed",
         advance_time_seconds: float | None = None,
     ) -> PatientState:
         """Create a tension pneumothorax using Pulse's native action."""
@@ -393,10 +696,14 @@ class PulseEngineAdapter:
             raise ValueError("side must be 'left' or 'right'.")
         if not 0.0 <= severity <= 1.0:
             raise ValueError("severity must be between 0.0 and 1.0.")
+        type_key = pneumothorax_type.strip().lower()
+        if type_key not in self._PNEUMOTHORAX_TYPE_MAP:
+            valid = ", ".join(sorted(self._PNEUMOTHORAX_TYPE_MAP))
+            raise ValueError(f"pneumothorax_type must be one of: {valid}")
 
         action = SETensionPneumothorax()
         action.set_side(self._SIDE_MAP[side_key])
-        action.set_type(eGate.Open)
+        action.set_type(self._PNEUMOTHORAX_TYPE_MAP[type_key])
         action.get_severity().set_value(severity)
         return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
 
@@ -430,8 +737,7 @@ class PulseEngineAdapter:
             valid = ", ".join(sorted(self._INTUBATION_TYPE_MAP))
             raise ValueError(f"Unsupported airway support '{kind}'. Expected one of: {valid}")
 
-        action = SEIntubation()
-        action.set_type(self._INTUBATION_TYPE_MAP[kind_key])
+        action = self._build_intubation_action(kind_key)
         return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
 
     def apply_actions(
@@ -470,6 +776,7 @@ class PulseEngineAdapter:
             raise RuntimeError(f"Pulse failed to advance by {seconds} simulated seconds.")
 
         self._refresh_raw_metrics()
+        self._tick_pending_diagnostics(seconds)
         return self.get_full_state()
 
     def get_full_state(self) -> PatientState:
@@ -537,6 +844,7 @@ class PulseEngineAdapter:
         )
         state = PatientState(
             scenario_id=self._runtime.scenario_id,
+            scenario_difficulty=self._runtime.scenario_difficulty,
             patient_id=self._runtime.patient_id,
             sim_time_s=metrics.get("simulated_time_seconds") or 0.0,
             heart_rate_bpm=metrics.get("heart_rate_bpm"),
@@ -559,12 +867,13 @@ class PulseEngineAdapter:
             position=self._runtime.patient_position,
             oxygen_device=self._runtime.oxygen_device,
             oxygen_flow_lpm=self._runtime.oxygen_flow_lpm,
-            airway_support=self._AIRWAY_SUPPORT_NAMES.get(self._runtime.intubation_type),
+            airway_support=self._derive_airway_support_name(),
             intubated=self._is_intubated(),
             abg_result=abg_result,
             cbc_result=cbc_result,
             bmp_result=bmp_result,
             pending_diagnostics=dict(self._runtime.pending_diagnostics),
+            ready_diagnostics=sorted(self._runtime.ready_diagnostics),
             active_infusions=dict(self._runtime.active_infusions),
             active_hemorrhages=dict(self._runtime.active_hemorrhages),
         )
@@ -798,6 +1107,7 @@ class PulseEngineAdapter:
     def _track_runtime_action(self, action: SEAction) -> None:
         if isinstance(action, SEIntubation):
             self._runtime.intubation_type = action.get_type().name
+            self._runtime.airway_support_mode = None
             return
 
         if isinstance(action, SESupplementalOxygen):
@@ -805,6 +1115,54 @@ class PulseEngineAdapter:
             self._runtime.oxygen_device = _snake_case(device_name) if device_name and "Null" not in device_name else None
             flow_lpm = self._get_scalar_value(action, "has_flow", "get_flow", unit=VolumePerTimeUnit.L_Per_min)
             self._runtime.oxygen_flow_lpm = flow_lpm
+            return
+
+        if isinstance(action, SEBagValveMaskConfiguration):
+            configuration = action.get_configuration()
+            self._runtime.airway_support_mode = "bag_valve_mask"
+            self._runtime.fio2 = self._extract_substance_fraction(configuration, "Oxygen")
+            self._runtime.peep_cmh2o = self._get_scalar_value(
+                configuration,
+                "has_valve_positive_end_expired_pressure",
+                "get_valve_positive_end_expired_pressure",
+                unit=PressureUnit.cmH2O,
+            )
+            return
+
+        if isinstance(action, SEBagValveMaskAutomated):
+            self._runtime.airway_support_mode = "bag_valve_mask"
+            return
+
+        if isinstance(action, SEMechanicalVentilatorContinuousPositiveAirwayPressure):
+            if action.get_connection() == eSwitch.On:
+                self._runtime.airway_support_mode = "cpap"
+                self._runtime.fio2 = self._get_scalar_value(
+                    action,
+                    "has_fraction_inspired_oxygen",
+                    "get_fraction_inspired_oxygen",
+                )
+                self._runtime.peep_cmh2o = self._get_scalar_value(
+                    action,
+                    "has_positive_end_expired_pressure",
+                    "get_positive_end_expired_pressure",
+                    unit=PressureUnit.cmH2O,
+                )
+            return
+
+        if isinstance(action, SEMechanicalVentilatorPressureControl):
+            if action.get_connection() == eSwitch.On:
+                self._runtime.airway_support_mode = "pressure_control_ventilation"
+                self._runtime.fio2 = self._get_scalar_value(
+                    action,
+                    "has_fraction_inspired_oxygen",
+                    "get_fraction_inspired_oxygen",
+                )
+                self._runtime.peep_cmh2o = self._get_scalar_value(
+                    action,
+                    "has_positive_end_expired_pressure",
+                    "get_positive_end_expired_pressure",
+                    unit=PressureUnit.cmH2O,
+                )
             return
 
         if isinstance(action, SENeedleDecompression) and action.has_side():
@@ -818,6 +1176,21 @@ class PulseEngineAdapter:
             severity = self._get_scalar_value(action, "has_severity", "get_severity")
             self._runtime.active_tension_pneumothorax_sides.add(side)
             self._runtime.pain_sources[f"tension_pneumothorax:{side}"] = severity or 0.8
+            return
+
+        if isinstance(action, SEPericardialEffusion):
+            rate_ml_per_min = self._get_scalar_value(
+                action,
+                "has_effusion_rate",
+                "get_effusion_rate",
+                unit=VolumePerTimeUnit.mL_Per_min,
+            )
+            if rate_ml_per_min is None or abs(rate_ml_per_min) < 1e-6:
+                self._runtime.pericardial_effusion_rate_ml_per_min = None
+                self._runtime.pain_sources.pop("pericardial_effusion", None)
+            else:
+                self._runtime.pericardial_effusion_rate_ml_per_min = rate_ml_per_min
+                self._runtime.pain_sources["pericardial_effusion"] = min(abs(rate_ml_per_min) / 150.0, 1.0)
             return
 
         if isinstance(action, SEHemorrhage) and action.has_compartment():
@@ -863,24 +1236,9 @@ class PulseEngineAdapter:
                 "get_rate",
                 unit=VolumePerTimeUnit.mL_Per_min,
             )
-            concentration_mg_per_ml = self._get_scalar_value(
-                action,
-                "has_concentration",
-                "get_concentration",
-                unit=MassPerVolumeUnit.mg_Per_mL,
-            )
-
-            delivered_dose = None
-            if rate_ml_per_min is not None:
-                delivered_dose = (
-                    rate_ml_per_min * concentration_mg_per_ml
-                    if concentration_mg_per_ml is not None
-                    else rate_ml_per_min
-                )
-
             name = _snake_case(substance)
-            if delivered_dose is not None and delivered_dose > 0:
-                self._runtime.active_infusions[name] = delivered_dose
+            if rate_ml_per_min is not None and rate_ml_per_min > 0:
+                self._runtime.active_infusions[name] = rate_ml_per_min
             else:
                 self._runtime.active_infusions.pop(name, None)
 
@@ -935,6 +1293,14 @@ class PulseEngineAdapter:
             return "absent right"
         return "present bilateral"
 
+    def _derive_airway_support_name(self) -> str | None:
+        if self._runtime.airway_support_mode:
+            return self._AIRWAY_SUPPORT_DISPLAY.get(
+                self._runtime.airway_support_mode,
+                self._runtime.airway_support_mode,
+            )
+        return self._AIRWAY_SUPPORT_NAMES.get(self._runtime.intubation_type)
+
     def _is_intubated(self) -> bool:
         return self._runtime.intubation_type in {
             eIntubationType.Esophageal.name,
@@ -942,6 +1308,22 @@ class PulseEngineAdapter:
             eIntubationType.RightMainstem.name,
             eIntubationType.Tracheal.name,
         }
+
+    def _tick_pending_diagnostics(self, elapsed_seconds: float) -> None:
+        if not self._runtime.pending_diagnostics:
+            return
+
+        completed: list[str] = []
+        for tool_name, remaining in list(self._runtime.pending_diagnostics.items()):
+            updated_remaining = max(0, int(math.ceil(remaining - elapsed_seconds)))
+            if updated_remaining == 0:
+                completed.append(tool_name)
+                self._runtime.pending_diagnostics.pop(tool_name, None)
+            else:
+                self._runtime.pending_diagnostics[tool_name] = updated_remaining
+
+        for tool_name in completed:
+            self._runtime.ready_diagnostics.add(tool_name)
 
     def _derive_shock_index(self, heart_rate_bpm: float | None, systolic_bp_mmhg: float | None) -> float | None:
         if heart_rate_bpm is None or systolic_bp_mmhg is None or systolic_bp_mmhg <= 0:
@@ -1037,6 +1419,16 @@ class PulseEngineAdapter:
             alerts.append("possible_tension_pneumothorax")
         if self._runtime.intubation_type == eIntubationType.Esophageal.name:
             alerts.append("misplaced_airway")
+        if self._runtime.pending_diagnostics:
+            alerts.append("diagnostics_pending")
+        effusion_rate = self._runtime.pericardial_effusion_rate_ml_per_min
+        if effusion_rate is not None:
+            if effusion_rate > 0:
+                alerts.append("active_pericardial_effusion")
+                if map_mmhg is not None and map_mmhg < 65:
+                    alerts.append("possible_cardiac_tamponade")
+            elif effusion_rate < 0:
+                alerts.append("pericardiocentesis_in_progress")
         breath_sounds = self._derive_breath_sounds()
         if breath_sounds == "absent bilateral":
             alerts.append("bilateral_absent_breath_sounds")
@@ -1093,6 +1485,28 @@ class PulseEngineAdapter:
         scalar = getter()
         try:
             return float(scalar.get_value(unit) if unit is not None else scalar.get_value())
+        except Exception:
+            return None
+
+    def _build_intubation_action(self, kind: str) -> SEIntubation:
+        kind_key = kind.strip().lower().replace("-", "_").replace(" ", "_")
+        if kind_key not in self._INTUBATION_TYPE_MAP:
+            valid = ", ".join(sorted(self._INTUBATION_TYPE_MAP))
+            raise ValueError(f"Unsupported airway support '{kind}'. Expected one of: {valid}")
+
+        action = SEIntubation()
+        action.set_type(self._INTUBATION_TYPE_MAP[kind_key])
+        return action
+
+    @staticmethod
+    def _extract_substance_fraction(configuration: Any, substance_name: str) -> float | None:
+        try:
+            fraction = configuration.get_fraction_inspired_gas(substance_name)
+            amount = fraction.get_fraction_amount()
+            if amount is None:
+                return None
+            value = amount.get_value()
+            return None if value is None else float(value)
         except Exception:
             return None
 

@@ -28,6 +28,7 @@ from .patient_state import (
     LactateTrend,
     MentalStatus,
     PatientState,
+    ScenarioDifficulty,
 )
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "MentalStatus",
     "ObservationMetadata",
     "PatientState",
+    "ScenarioDifficulty",
     "PulsePhysiologyAction",
     "PulsePhysiologyObservation",
     "ToolAction",
