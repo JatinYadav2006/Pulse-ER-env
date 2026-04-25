@@ -8,6 +8,11 @@ from typing import Any, Callable
 
 from pulse_physiology_env.models import PulsePhysiologyAction, ToolError, ToolResult
 from pulse_physiology_env.patient_state import PatientState
+from pulse_physiology_env.tool_catalog import (
+    canonicalize_tool_name,
+    coerce_boolean_argument,
+    coerce_numeric_argument,
+)
 
 from .pulse_engine_adapter import PulseEngineAdapter
 
@@ -214,7 +219,7 @@ class PulseToolExecutor:
     def execute(self, action: PulsePhysiologyAction) -> ToolExecution:
         """Validate and execute a tool action."""
 
-        tool_name = action.tool_name.strip()
+        tool_name = canonicalize_tool_name(action.tool_name.strip(), allowed_tools=list(self._handlers))
         if tool_name not in self._handlers:
             return self._failure(
                 tool_name=tool_name,
@@ -634,7 +639,7 @@ class PulseToolExecutor:
         monitor_seconds = self._read_optional_float(arguments, keys=("monitor_seconds",)) or 60.0
         if support_key in {"bag_valve_mask", "bvm"}:
             state = self._adapter.apply_bag_valve_mask(
-                fio2=self._read_optional_float(arguments, keys=("fio2", "fraction_inspired_oxygen")),
+                fio2=self._read_optional_fio2(arguments, keys=("fio2", "fraction_inspired_oxygen")),
                 peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")),
                 respiration_rate_bpm=self._read_optional_float(arguments, keys=("respiration_rate_bpm", "rate_bpm")),
                 inspiratory_expiratory_ratio=self._read_optional_float(arguments, keys=("ie_ratio", "inspiratory_expiratory_ratio")),
@@ -645,14 +650,14 @@ class PulseToolExecutor:
             )
         elif support_key == "cpap":
             state = self._adapter.apply_cpap(
-                fio2=self._read_optional_float(arguments, keys=("fio2", "fraction_inspired_oxygen")),
+                fio2=self._read_optional_fio2(arguments, keys=("fio2", "fraction_inspired_oxygen")),
                 peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")),
                 pressure_support_cmh2o=self._read_optional_float(arguments, keys=("pressure_support_cmh2o", "pressure_support")),
                 advance_time_seconds=monitor_seconds,
             )
         elif support_key in {"pressure_control_ventilation", "pressure_control"}:
             state = self._adapter.apply_pressure_control_ventilation(
-                fio2=self._read_optional_float(arguments, keys=("fio2", "fraction_inspired_oxygen")),
+                fio2=self._read_optional_fio2(arguments, keys=("fio2", "fraction_inspired_oxygen")),
                 peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")),
                 inspiratory_pressure_cmh2o=self._read_optional_float(arguments, keys=("inspiratory_pressure_cmh2o", "pressure_cmh2o")),
                 respiration_rate_bpm=self._read_optional_float(arguments, keys=("respiration_rate_bpm", "rate_bpm")),
@@ -661,7 +666,7 @@ class PulseToolExecutor:
             )
         elif support_key in {"volume_control_ventilation", "volume_control"}:
             state = self._adapter.apply_volume_control_ventilation(
-                fio2=self._read_optional_float(arguments, keys=("fio2", "fraction_inspired_oxygen")),
+                fio2=self._read_optional_fio2(arguments, keys=("fio2", "fraction_inspired_oxygen")),
                 peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")),
                 tidal_volume_ml=self._read_optional_float(arguments, keys=("tidal_volume_ml", "squeeze_volume_ml")),
                 respiration_rate_bpm=self._read_optional_float(arguments, keys=("respiration_rate_bpm", "rate_bpm")),
@@ -685,7 +690,7 @@ class PulseToolExecutor:
         state = self._adapter.apply_bag_valve_mask(
             respiration_rate_bpm=rate_bpm,
             squeeze_volume_ml=volume_ml,
-            fio2=self._read_optional_float(arguments, keys=("fio2", "fraction_inspired_oxygen")),
+            fio2=self._read_optional_fio2(arguments, keys=("fio2", "fraction_inspired_oxygen")),
             peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")),
             airway_adjunct=arguments.get("airway_adjunct"),
             advance_time_seconds=monitor_seconds,
@@ -714,7 +719,7 @@ class PulseToolExecutor:
         tidal_volume_ml = self._read_positive_float(arguments, keys=("volume_ml", "tidal_volume_ml"))
         runtime = self._adapter._runtime
         state = self._adapter.apply_volume_control_ventilation(
-            fio2=self._read_optional_float(arguments, keys=("fio2",)) or runtime.fio2,
+            fio2=self._read_optional_fio2(arguments, keys=("fio2",)) or runtime.fio2,
             peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")) or runtime.peep_cmh2o,
             tidal_volume_ml=tidal_volume_ml,
             respiration_rate_bpm=self._read_optional_float(arguments, keys=("breaths_per_min", "respiration_rate_bpm", "rate_bpm")) or runtime.ventilator_respiration_rate_bpm,
@@ -732,7 +737,7 @@ class PulseToolExecutor:
         breaths_per_min = self._read_positive_float(arguments, keys=("breaths_per_min", "respiration_rate_bpm", "rate_bpm"))
         runtime = self._adapter._runtime
         state = self._adapter.apply_volume_control_ventilation(
-            fio2=self._read_optional_float(arguments, keys=("fio2",)) or runtime.fio2,
+            fio2=self._read_optional_fio2(arguments, keys=("fio2",)) or runtime.fio2,
             peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")) or runtime.peep_cmh2o,
             tidal_volume_ml=self._read_optional_float(arguments, keys=("volume_ml", "tidal_volume_ml")) or runtime.ventilator_tidal_volume_ml,
             respiration_rate_bpm=breaths_per_min,
@@ -747,7 +752,7 @@ class PulseToolExecutor:
 
     def _handle_set_ventilator_fio2(self, arguments: dict[str, Any]) -> ToolExecution:
         previous = self._adapter.get_full_state()
-        fio2 = self._read_positive_float(arguments, keys=("fraction", "fio2", "fraction_inspired_oxygen"))
+        fio2 = self._read_positive_fio2(arguments, keys=("fraction", "fio2", "fraction_inspired_oxygen"))
         if fio2 > 1.0:
             raise ValueError("fio2 must be between 0.21 and 1.0.")
         runtime = self._adapter._runtime
@@ -770,7 +775,7 @@ class PulseToolExecutor:
         pressor = str(arguments.get("pressor") or arguments.get("agent") or "norepinephrine")
         rate_ml_per_min = self._read_optional_float(arguments, keys=("rate_ml_per_min",))
         concentration_ug_per_ml = self._read_optional_float(arguments, keys=("concentration_ug_per_ml",))
-        if bool(arguments.get("stop")):
+        if self._read_optional_bool(arguments, keys=("stop",)) is True:
             rate_ml_per_min = 0.0
         monitor_seconds = self._read_optional_float(arguments, keys=("monitor_seconds",)) or 60.0
         state = self._adapter.set_pressor(
@@ -1194,7 +1199,7 @@ class PulseToolExecutor:
         state: PatientState,
         arguments: dict[str, Any],
     ) -> ToolExecution | None:
-        if bool(arguments.get("admin_override")):
+        if self._read_optional_bool(arguments, keys=("admin_override",)) is True:
             return None
         return self._failure(
             tool_name=tool_name,
@@ -1284,10 +1289,34 @@ class PulseToolExecutor:
         return value
 
     @staticmethod
+    def _read_positive_fio2(arguments: dict[str, Any], *, keys: tuple[str, ...]) -> float:
+        value = PulseToolExecutor._read_optional_fio2(arguments, keys=keys)
+        if value is None:
+            joined = ", ".join(keys)
+            raise ValueError(f"One of {joined} is required.")
+        return value
+
+    @staticmethod
     def _read_optional_float(arguments: dict[str, Any], *, keys: tuple[str, ...]) -> float | None:
         for key in keys:
             if key in arguments and arguments[key] is not None:
-                return float(arguments[key])
+                return coerce_numeric_argument(arguments[key])
+        return None
+
+    @staticmethod
+    def _read_optional_fio2(arguments: dict[str, Any], *, keys: tuple[str, ...]) -> float | None:
+        value = PulseToolExecutor._read_optional_float(arguments, keys=keys)
+        if value is None:
+            return None
+        if 1.0 < value <= 100.0:
+            return value / 100.0
+        return value
+
+    @staticmethod
+    def _read_optional_bool(arguments: dict[str, Any], *, keys: tuple[str, ...]) -> bool | None:
+        for key in keys:
+            if key in arguments and arguments[key] is not None:
+                return coerce_boolean_argument(arguments[key])
         return None
 
     @staticmethod

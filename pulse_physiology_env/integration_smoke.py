@@ -22,6 +22,7 @@ from pulse_physiology_env.patient_state import PatientState
 from pulse_physiology_env.real_backend import RealPulseBackend
 from pulse_physiology_env.server.mock_scenarios import DEFAULT_MOCK_SCENARIO_ID
 from pulse_physiology_env.tool_catalog import KNOWN_TOOL_NAMES
+from pulse_physiology_env.tool_parser import parse_tool_action
 
 
 REQUIRED_OBSERVATION_FIELDS = {
@@ -249,6 +250,35 @@ def _regression_check_readme_frontmatter() -> None:
     )
 
 
+def _regression_check_argument_normalization() -> None:
+    """Ensure harmless formatting noise is normalized instead of penalized."""
+
+    oxygen_action = parse_tool_action(
+        '{"tool_name":"Give Oxygen","arguments":{"flow_lpm":"2LPM"}}'
+    )
+    _assert(oxygen_action.tool_name == "give_oxygen", "argument_normalization: tool_name should canonicalize")
+    _assert(
+        oxygen_action.arguments["flow_lpm"] == 2.0,
+        "argument_normalization: oxygen flow should coerce to float",
+    )
+
+    bleed_action = parse_tool_action(
+        '{"tool_name":"control_bleeding","arguments":{"method":"Tourniquet"}}'
+    )
+    _assert(
+        bleed_action.arguments["method"] == "tourniquet",
+        "argument_normalization: choice values should canonicalize",
+    )
+
+    pressor_action = parse_tool_action(
+        '{"tool_name":"give_pressor","arguments":{"stop":"false"}}'
+    )
+    _assert(
+        pressor_action.arguments["stop"] is False,
+        "argument_normalization: boolean-like strings should coerce to booleans",
+    )
+
+
 def main() -> None:
     """Run lightweight contract checks against a mock or real backend implementation."""
 
@@ -273,6 +303,8 @@ def main() -> None:
     print("PASS real backend wrapper shape")
     _regression_check_readme_frontmatter()
     print("PASS README frontmatter encoding")
+    _regression_check_argument_normalization()
+    print("PASS argument normalization")
 
     reset_result = backend.reset(args.scenario)
     _check_response_shape(reset_result, "reset")

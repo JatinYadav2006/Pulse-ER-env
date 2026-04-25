@@ -7,6 +7,7 @@ from typing import Any
 
 from pulse_physiology_env.models import PulsePhysiologyAction
 from pulse_physiology_env.patient_state import PatientState
+from pulse_physiology_env.tool_catalog import coerce_boolean_argument, normalize_contract_token
 
 from .scenarios import ScenarioDefinition
 
@@ -402,7 +403,7 @@ class RewardEngine:
             if tool_name == "activate_massive_transfusion_protocol":
                 reward += 0.15 if self._is_severe_bleed(before) else -0.2
 
-        if tool_name in self.PRESSOR_TOOLS and tool_name != "stop_infusion" and self._is_volume_depleted(before):
+        if self._is_pressor_activation(tool_name, arguments) and self._is_volume_depleted(before):
             reward -= 0.5
 
         if tool_name in self.DECOMPRESSION_TOOLS and not self._has_pneumothorax_signs(before):
@@ -437,7 +438,7 @@ class RewardEngine:
         ):
             reward += 0.15
 
-        if tool_name in self.PRESSOR_TOOLS and tool_name != "stop_infusion" and after.mean_arterial_pressure_mmhg is not None and after.mean_arterial_pressure_mmhg >= self.MAP_TARGET:
+        if self._is_pressor_activation(tool_name, arguments) and after.mean_arterial_pressure_mmhg is not None and after.mean_arterial_pressure_mmhg >= self.MAP_TARGET:
             reward += 0.1
 
         if tool_name == "administer_epinephrine_bolus" and "cardiac_arrest" in before.active_alerts:
@@ -571,9 +572,9 @@ class RewardEngine:
             if region in {"chest", "lung", "thoracic"}:
                 tags.add("respiratory_assessment")
 
-        if tool_name in self.PRESSOR_TOOLS and tool_name != "stop_infusion":
+        if self._is_pressor_activation(tool_name, arguments):
             tags.add("pressor_if_needed")
-            pressor = str(arguments.get("pressor") or arguments.get("agent") or "").strip().lower().replace("-", "_")
+            pressor = normalize_contract_token(arguments.get("pressor") or arguments.get("agent") or "")
             if not pressor and tool_name == "start_norepinephrine_infusion":
                 pressor = "norepinephrine"
             elif not pressor and tool_name == "start_phenylephrine_infusion":
@@ -607,16 +608,27 @@ class RewardEngine:
             return "plasma"
         if tool_name == "activate_massive_transfusion_protocol":
             return "packed_rbc"
-        return str(arguments.get("fluid_type") or arguments.get("fluid") or "saline").strip().lower().replace("-", "_")
+        return normalize_contract_token(arguments.get("fluid_type") or arguments.get("fluid") or "saline")
 
     @classmethod
     def _canonical_diagnostic_key(cls, tool_name: str, arguments: dict[str, Any]) -> str | None:
         if tool_name in cls.DIAGNOSTIC_TOOL_ALIASES:
             return cls.DIAGNOSTIC_TOOL_ALIASES[tool_name]
         if tool_name == "order_point_of_care_ultrasound":
-            region = str(arguments.get("region") or "cardiac").strip().lower().replace("-", "_").replace(" ", "_")
+            region = normalize_contract_token(arguments.get("region") or "cardiac")
             return f"order_point_of_care_ultrasound:{region}"
         return None
+
+    @staticmethod
+    def _is_pressor_activation(tool_name: str, arguments: dict[str, Any]) -> bool:
+        if tool_name not in RewardEngine.PRESSOR_TOOLS or tool_name == "stop_infusion":
+            return False
+        if tool_name != "give_pressor":
+            return True
+        try:
+            return not coerce_boolean_argument(arguments.get("stop", False))
+        except ValueError:
+            return True
 
     @staticmethod
     def _has_pneumothorax_signs(state: PatientState) -> bool:

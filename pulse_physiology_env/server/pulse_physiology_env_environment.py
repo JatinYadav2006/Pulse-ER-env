@@ -11,6 +11,7 @@ from openenv.core.env_server.types import EnvironmentMetadata, State
 try:
     from ..models import PulsePhysiologyAction, PulsePhysiologyObservation
     from ..patient_state import PatientState
+    from ..tool_catalog import canonicalize_tool_name
     from .atls_judge import ATLSJudge
     from .pathology_architect import PathologyArchitect, PathologyBlueprint
     from .patient_monitor import PatientMonitorVisualization
@@ -21,6 +22,7 @@ try:
 except ImportError:
     from models import PulsePhysiologyAction, PulsePhysiologyObservation
     from patient_state import PatientState
+    from tool_catalog import canonicalize_tool_name
     from server.atls_judge import ATLSJudge
     from server.pathology_architect import PathologyArchitect, PathologyBlueprint
     from server.patient_monitor import PatientMonitorVisualization
@@ -107,6 +109,14 @@ class PulsePhysiologyEnvironment(Environment):
 
         del timeout_s, kwargs
         self._state.step_count += 1
+        action = action.model_copy(
+            update={
+                "tool_name": canonicalize_tool_name(
+                    action.tool_name,
+                    allowed_tools=self._tool_executor.available_tools,
+                )
+            }
+        )
 
         previous_state = self._latest_patient_state or self._apply_episode_rules(self._adapter.get_full_state())
         execution = self._tool_executor.execute(action)
@@ -126,7 +136,6 @@ class PulsePhysiologyEnvironment(Environment):
         self._latest_patient_state = current_state
         self._last_reward_breakdown = breakdown
         self._state_history.append(current_state)
-        self._state_history = self._state_history[-PatientMonitorVisualization.MAX_TREND_POINTS :]
 
         return self._build_observation(
             current_state,
@@ -190,6 +199,7 @@ class PulsePhysiologyEnvironment(Environment):
                 state=state,
                 action_history=self._reward_tracker.action_history if self._reward_tracker is not None else [],
                 reward_profile=self._scenario.reward_profile,
+                state_history=self._state_history,
             ).as_dict(),
             "pathology_blueprint": self._active_blueprint.as_dict() if self._active_blueprint is not None else None,
         }
@@ -203,15 +213,40 @@ class PulsePhysiologyEnvironment(Environment):
         )
 
     def _resolve_generated_blueprint(self, kwargs: dict[str, object]) -> PathologyBlueprint | None:
+        has_scenario_id = kwargs.get("scenario_id") is not None
         raw_blueprint = kwargs.get("pathology_blueprint")
+        required_keys = {"patient_id", "injury_type", "severity"}
+        provided_authoring_keys = {key for key in required_keys if kwargs.get(key) is not None}
+
+        if has_scenario_id and (raw_blueprint is not None or provided_authoring_keys):
+            raise ValueError(
+                "Pass either scenario_id or generated-case authoring inputs, not both."
+            )
+
+        if raw_blueprint is not None and provided_authoring_keys:
+            raise ValueError(
+                "Pass either pathology_blueprint or patient_id/injury_type/severity, not both."
+            )
+
         if isinstance(raw_blueprint, dict):
+            missing_keys = required_keys - set(raw_blueprint)
+            if missing_keys:
+                missing = ", ".join(sorted(missing_keys))
+                raise ValueError(
+                    f"pathology_blueprint is missing required keys: {missing}"
+                )
             return self._pathology_architect.build_blueprint(
                 patient_id=str(raw_blueprint["patient_id"]),
                 injury_type=str(raw_blueprint["injury_type"]),
                 severity=float(raw_blueprint["severity"]),
             )
 
-        required_keys = {"patient_id", "injury_type", "severity"}
+        if provided_authoring_keys and provided_authoring_keys != required_keys:
+            missing = ", ".join(sorted(required_keys - provided_authoring_keys))
+            raise ValueError(
+                f"Generated-case reset requires patient_id, injury_type, and severity together. Missing: {missing}"
+            )
+
         if required_keys.issubset(kwargs):
             return self._pathology_architect.build_blueprint(
                 patient_id=str(kwargs["patient_id"]),

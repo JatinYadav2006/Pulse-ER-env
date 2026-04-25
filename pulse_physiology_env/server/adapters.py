@@ -15,7 +15,12 @@ from ..models import (
     ToolResult,
 )
 from ..rewards import compute_reward
-from ..tool_catalog import KNOWN_TOOL_NAMES, ToolValidationError, validate_tool_arguments
+from ..tool_catalog import (
+    KNOWN_TOOL_NAMES,
+    ToolValidationError,
+    canonicalize_tool_name,
+    validate_tool_arguments,
+)
 from .mock_scenarios import DEFAULT_MOCK_SCENARIO_ID, MOCK_SCENARIOS, MockScenarioDefinition
 
 
@@ -109,6 +114,9 @@ class MockPulseAdapter(PatientBackend):
                 retryable=True,
                 tool_name=action.tool_name,
             )
+
+        canonical_tool_name = canonicalize_tool_name(action.tool_name, allowed_tools=list(KNOWN_TOOL_NAMES))
+        action = action.model_copy(update={"tool_name": canonical_tool_name})
 
         if action.tool_name not in KNOWN_TOOL_NAMES:
             return self._error_response(
@@ -225,6 +233,22 @@ class MockPulseAdapter(PatientBackend):
     def _apply_intervention(self, action: ToolAction) -> EnvironmentResponse:
         assert self._state is not None
         assert self._scenario is not None
+
+        if action.tool_name == "give_pressor" and action.arguments.get("stop") is True:
+            updates = self._state.model_dump()
+            self._apply_tool_side_effects(action, updates, effect_scale=0.0)
+            self._active_supports.discard("give_pressor")
+            self._state = PatientState(**updates)
+            return self._build_response(
+                reward=0.0,
+                tool_result=ToolResult(
+                    tool_name=action.tool_name,
+                    success=True,
+                    message="Vasopressor support stopped.",
+                    state_changed=True,
+                    changed_fields=[],
+                ),
+            )
 
         effects = self._scenario.tool_effects.get(action.tool_name)
         if effects is None:
@@ -456,7 +480,10 @@ class MockPulseAdapter(PatientBackend):
         elif tool_name == "give_pressor":
             active_infusions = dict(updates.get("active_infusions") or {})
             pressor_name = str(arguments.get("pressor") or arguments.get("agent") or "norepinephrine")
-            active_infusions[pressor_name] = float(arguments.get("rate_ml_per_min", 5))
+            if arguments.get("stop") is True:
+                active_infusions.pop(pressor_name, None)
+            else:
+                active_infusions[pressor_name] = float(arguments.get("rate_ml_per_min", 5))
             updates["active_infusions"] = active_infusions
         elif tool_name == "needle_decompression":
             updates["breath_sounds"] = "present bilateral"
