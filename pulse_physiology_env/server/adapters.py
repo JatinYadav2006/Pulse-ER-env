@@ -15,8 +15,44 @@ from ..models import (
     ToolResult,
 )
 from ..rewards import compute_reward
-from ..tool_catalog import ToolValidationError, validate_tool_arguments
+from ..tool_catalog import KNOWN_TOOL_NAMES, ToolValidationError, validate_tool_arguments
 from .mock_scenarios import DEFAULT_MOCK_SCENARIO_ID, MOCK_SCENARIOS, MockScenarioDefinition
+
+
+MOCK_READ_ONLY_TOOLS = {
+    "get_vitals",
+    "summarize_state",
+    "check_deterioration",
+    "recommend_next_step",
+    "get_respiratory_status",
+    "get_blood_gas",
+    "get_cbc",
+    "get_bmp",
+}
+
+MOCK_DIAGNOSTIC_DELAYS = {
+    "get_blood_gas": 120,
+    "get_cbc": 240,
+    "get_bmp": 300,
+}
+
+MOCK_EXTENDED_INTERVENTION_EFFECTS = {
+    "give_pressor": {
+        "baseline_stable": {"systolic_bp_mmhg": 2.0, "diastolic_bp_mmhg": 1.0, "heart_rate_bpm": -1.0},
+        "respiratory_distress": {"systolic_bp_mmhg": 4.0, "diastolic_bp_mmhg": 2.0, "heart_rate_bpm": -1.0},
+        "hemorrhagic_shock": {"systolic_bp_mmhg": 10.0, "diastolic_bp_mmhg": 6.0, "heart_rate_bpm": -3.0},
+    },
+    "needle_decompression": {
+        "baseline_stable": {"spo2": 0.0, "respiration_rate_bpm": -0.5},
+        "respiratory_distress": {"spo2": 0.06, "respiration_rate_bpm": -6.0, "heart_rate_bpm": -4.0},
+        "hemorrhagic_shock": {"spo2": 0.01, "respiration_rate_bpm": -1.0, "heart_rate_bpm": -1.0},
+    },
+    "pericardiocentesis": {
+        "baseline_stable": {"systolic_bp_mmhg": 1.0, "diastolic_bp_mmhg": 0.5},
+        "respiratory_distress": {"systolic_bp_mmhg": 2.0, "diastolic_bp_mmhg": 1.0, "heart_rate_bpm": -1.0},
+        "hemorrhagic_shock": {"systolic_bp_mmhg": 5.0, "diastolic_bp_mmhg": 3.0, "heart_rate_bpm": -2.0},
+    },
+}
 
 
 class PatientBackend(ABC):
@@ -74,7 +110,7 @@ class MockPulseAdapter(PatientBackend):
                 tool_name=action.tool_name,
             )
 
-        if action.tool_name not in INITIAL_TOOL_NAMES:
+        if action.tool_name not in KNOWN_TOOL_NAMES:
             return self._error_response(
                 code="UNKNOWN_TOOL",
                 message=f"Unsupported tool '{action.tool_name}'.",
@@ -86,7 +122,7 @@ class MockPulseAdapter(PatientBackend):
             normalized_arguments = validate_tool_arguments(
                 action.tool_name,
                 action.arguments,
-                allowed_tools=INITIAL_TOOL_NAMES,
+                allowed_tools=KNOWN_TOOL_NAMES,
             )
         except ToolValidationError as exc:
             return self._error_response(
@@ -103,7 +139,7 @@ class MockPulseAdapter(PatientBackend):
 
         if action.tool_name == "advance_time":
             result = self._advance_time(action)
-        elif action.tool_name in {"summarize_state", "check_deterioration", "recommend_next_step", "get_vitals"}:
+        elif action.tool_name in MOCK_READ_ONLY_TOOLS:
             result = self._read_only_tool(action.tool_name)
         else:
             result = self._apply_intervention(action)
@@ -161,6 +197,18 @@ class MockPulseAdapter(PatientBackend):
             updates[field_name] = current_value + adjusted_delta * scale
 
         updates["sim_time_s"] = self._state.sim_time_s + seconds
+        pending_diagnostics = dict(self._state.pending_diagnostics)
+        ready_diagnostics = list(self._state.ready_diagnostics)
+        for tool_name, remaining_seconds in list(pending_diagnostics.items()):
+            remaining_after_step = max(0, int(remaining_seconds - seconds))
+            if remaining_after_step <= 0:
+                pending_diagnostics.pop(tool_name, None)
+                if tool_name not in ready_diagnostics:
+                    ready_diagnostics.append(tool_name)
+            else:
+                pending_diagnostics[tool_name] = remaining_after_step
+        updates["pending_diagnostics"] = pending_diagnostics
+        updates["ready_diagnostics"] = ready_diagnostics
         self._state = PatientState(**updates)
 
         return self._build_response(
@@ -178,7 +226,10 @@ class MockPulseAdapter(PatientBackend):
         assert self._state is not None
         assert self._scenario is not None
 
-        if action.tool_name not in self._scenario.tool_effects:
+        effects = self._scenario.tool_effects.get(action.tool_name)
+        if effects is None:
+            effects = MOCK_EXTENDED_INTERVENTION_EFFECTS.get(action.tool_name, {}).get(self._scenario.scenario_id)
+        if effects is None:
             return self._error_response(
                 code="UNSUPPORTED_IN_SCENARIO",
                 message=f"{action.tool_name} is not modeled for scenario '{self._scenario.scenario_id}'.",
@@ -188,12 +239,13 @@ class MockPulseAdapter(PatientBackend):
 
         updates = self._state.model_dump()
         effect_scale = self._intervention_scale(action.tool_name)
-        for field_name, delta in self._scenario.tool_effects[action.tool_name].items():
+        for field_name, delta in effects.items():
             current_value = updates.get(field_name)
             if current_value is None:
                 continue
             updates[field_name] = current_value + (delta * effect_scale)
 
+        self._apply_tool_side_effects(action, updates, effect_scale)
         self._active_supports.add(action.tool_name)
         self._state = PatientState(**updates)
 
@@ -265,6 +317,13 @@ class MockPulseAdapter(PatientBackend):
             message = "Deterioration ongoing." if self._state.active_alerts else "Patient currently stable."
         elif tool_name == "recommend_next_step":
             message = f"Recommended next step: {self._scenario.recommended_actions[0]}."
+        elif tool_name == "get_respiratory_status":
+            message = (
+                f"Breath sounds {self._state.breath_sounds}, SpO2 {self._state.spo2:.2f}, "
+                f"RR {self._state.respiration_rate_bpm:.0f}, airway support {self._state.airway_support or 'none'}."
+            )
+        elif tool_name in MOCK_DIAGNOSTIC_DELAYS:
+            message = self._handle_diagnostic_read(tool_name)
         else:
             message = "Current vitals retrieved."
 
@@ -373,6 +432,143 @@ class MockPulseAdapter(PatientBackend):
                 return delta * 0.3
         return delta
 
+    def _apply_tool_side_effects(
+        self,
+        action: ToolAction,
+        updates: dict,
+        effect_scale: float,
+    ) -> None:
+        tool_name = action.tool_name
+        arguments = action.arguments
+
+        if tool_name == "give_oxygen":
+            updates["oxygen_device"] = str(arguments.get("device") or "nasal_cannula")
+            updates["oxygen_flow_lpm"] = float(arguments.get("flow_lpm", 15))
+        elif tool_name == "position_patient":
+            updates["position"] = str(arguments.get("position") or updates.get("position") or "upright")
+        elif tool_name == "airway_support":
+            updates["airway_support"] = str(arguments.get("mode") or arguments.get("support_type") or "basic")
+        elif tool_name == "give_fluids":
+            active_infusions = dict(updates.get("active_infusions") or {})
+            fluid_name = str(arguments.get("fluid_type") or arguments.get("fluid") or "saline")
+            active_infusions[fluid_name] = float(arguments.get("rate_ml_per_min", 100))
+            updates["active_infusions"] = active_infusions
+        elif tool_name == "give_pressor":
+            active_infusions = dict(updates.get("active_infusions") or {})
+            pressor_name = str(arguments.get("pressor") or arguments.get("agent") or "norepinephrine")
+            active_infusions[pressor_name] = float(arguments.get("rate_ml_per_min", 5))
+            updates["active_infusions"] = active_infusions
+        elif tool_name == "needle_decompression":
+            updates["breath_sounds"] = "present bilateral"
+        elif tool_name == "pericardiocentesis":
+            updates["active_alerts"] = [
+                alert
+                for alert in updates.get("active_alerts", [])
+                if alert != "tamponade"
+            ]
+
+        if tool_name == "needle_decompression" and self._scenario is not None:
+            if self._scenario.scenario_id == "respiratory_distress":
+                updates["spo2"] = min(1.0, float(updates.get("spo2") or 0.0) + (0.02 * effect_scale))
+
+    def _handle_diagnostic_read(self, tool_name: str) -> str:
+        assert self._state is not None
+        if tool_name in self._state.ready_diagnostics:
+            return self._diagnostic_result_message(tool_name)
+        if tool_name in self._state.pending_diagnostics:
+            remaining = self._state.pending_diagnostics[tool_name]
+            return f"{tool_name} is pending. {remaining} simulated seconds remaining before results are ready."
+
+        updates = self._state.model_dump()
+        pending_diagnostics = dict(self._state.pending_diagnostics)
+        pending_diagnostics[tool_name] = MOCK_DIAGNOSTIC_DELAYS[tool_name]
+        updates["pending_diagnostics"] = pending_diagnostics
+        self._state = PatientState(**updates)
+        return (
+            f"Ordered {tool_name}. Results will be ready after about "
+            f"{MOCK_DIAGNOSTIC_DELAYS[tool_name]} simulated seconds."
+        )
+
+    def _diagnostic_result_message(self, tool_name: str) -> str:
+        assert self._state is not None
+        updates = self._state.model_dump()
+        if tool_name == "get_blood_gas":
+            abg_result = self._build_abg_result()
+            updates["abg_result"] = abg_result.model_dump()
+            self._state = PatientState(**updates)
+            return (
+                f"ABG pH {abg_result.ph:.3f}, PaO2 {abg_result.partial_pressure_of_oxygen_mmhg:.1f} mmHg, "
+                f"PaCO2 {abg_result.partial_pressure_of_carbon_dioxide_mmhg:.1f} mmHg, "
+                f"lactate {abg_result.lactate_mg_per_dl:.1f} mg/dL."
+            )
+        if tool_name == "get_cbc":
+            cbc_result = self._build_cbc_result()
+            updates["cbc_result"] = cbc_result.model_dump()
+            self._state = PatientState(**updates)
+            return (
+                f"CBC hemoglobin {cbc_result.hemoglobin_g_per_dl:.1f} g/dL, "
+                f"hematocrit {cbc_result.hematocrit_fraction:.3f}, "
+                f"WBC {cbc_result.white_blood_cell_count_per_u_l:.0f} /uL."
+            )
+        bmp_result = self._build_bmp_result()
+        updates["bmp_result"] = bmp_result.model_dump()
+        self._state = PatientState(**updates)
+        return (
+            f"BMP sodium {bmp_result.sodium_mmol_per_l:.1f} mmol/L, "
+            f"potassium {bmp_result.potassium_mmol_per_l:.1f} mmol/L, "
+            f"creatinine {bmp_result.creatinine_mg_per_dl:.1f} mg/dL, "
+            f"glucose {bmp_result.glucose_mg_per_dl:.1f} mg/dL."
+        )
+
+    def _build_abg_result(self):
+        assert self._state is not None
+        from ..patient_state import ArterialBloodGasResult
+
+        spo2 = float(self._state.spo2 or 0.95)
+        systolic = float(self._state.systolic_bp_mmhg or 110.0)
+        ph = max(7.10, min(7.45, 7.40 - max(0.0, (95.0 - systolic) / 200.0)))
+        pao2 = max(45.0, min(110.0, 40.0 + spo2 * 60.0))
+        paco2 = max(28.0, min(60.0, 40.0 + max(0.0, (24.0 - float(self._state.respiration_rate_bpm or 16.0)) * 0.8)))
+        lactate = max(8.0, min(40.0, 10.0 + max(0.0, (100.0 - systolic) * 0.15)))
+        return ArterialBloodGasResult(
+            ph=round(ph, 3),
+            partial_pressure_of_oxygen_mmhg=round(pao2, 1),
+            partial_pressure_of_carbon_dioxide_mmhg=round(paco2, 1),
+            oxygen_saturation=round(spo2, 3),
+            bicarbonate_meq_per_l=24.0,
+            lactate_mg_per_dl=round(lactate, 1),
+            base_excess_meq_per_l=-2.0 if systolic < 95.0 else 0.0,
+            base_deficit_meq_per_l=2.0 if systolic < 95.0 else 0.0,
+        )
+
+    def _build_cbc_result(self):
+        assert self._state is not None
+        from ..patient_state import CompleteBloodCountResult
+
+        blood_volume = float(self._state.blood_volume_ml or 5400.0)
+        hemoglobin = max(7.5, min(15.0, 15.0 - max(0.0, (5400.0 - blood_volume) / 350.0)))
+        hematocrit = max(0.24, min(0.45, hemoglobin / 33.0))
+        return CompleteBloodCountResult(
+            hemoglobin_g_per_dl=round(hemoglobin, 1),
+            hematocrit_fraction=round(hematocrit, 3),
+            white_blood_cell_count_per_u_l=9000.0 if self._state.active_alerts else 7000.0,
+            platelet_count_per_u_l=250000.0,
+            red_blood_cell_count_per_u_l=4800000.0,
+        )
+
+    def _build_bmp_result(self):
+        assert self._state is not None
+        from ..patient_state import BasicMetabolicPanelResult
+
+        systolic = float(self._state.systolic_bp_mmhg or 110.0)
+        return BasicMetabolicPanelResult(
+            sodium_mmol_per_l=142.0 if systolic >= 95.0 else 145.0,
+            potassium_mmol_per_l=3.8 if systolic >= 95.0 else 4.2,
+            calcium_mmol_per_l=2.2,
+            creatinine_mg_per_dl=1.0 if systolic >= 95.0 else 1.4,
+            glucose_mg_per_dl=105.0 if not self._state.active_alerts else 128.0,
+        )
+
     def _changed_fields(self, previous_state: PatientState, new_state: PatientState) -> list[str]:
         changed_fields: list[str] = []
         for field_name in new_state.model_fields:
@@ -390,6 +586,36 @@ class MockPulseAdapter(PatientBackend):
         if updates["blood_volume_ml"] is not None:
             updates["blood_volume_ml"] = max(2500.0, updates["blood_volume_ml"])
 
+        if updates["systolic_bp_mmhg"] is not None and updates["diastolic_bp_mmhg"] is not None:
+            updates["mean_arterial_pressure_mmhg"] = (
+                updates["systolic_bp_mmhg"] + 2 * updates["diastolic_bp_mmhg"]
+            ) / 3.0
+        if updates["heart_rate_bpm"] is not None and updates["systolic_bp_mmhg"] not in (None, 0):
+            updates["shock_index"] = updates["heart_rate_bpm"] / updates["systolic_bp_mmhg"]
+        if self._scenario is not None and self._scenario.scenario_id == "respiratory_distress":
+            updates["breath_sounds"] = (
+                "present bilateral" if "needle_decompression" in self._active_supports else "diminished bilateral"
+            )
+        elif updates.get("breath_sounds") in (None, ""):
+            updates["breath_sounds"] = "present bilateral"
+
+        if self._scenario is not None and self._scenario.scenario_id == "hemorrhagic_shock":
+            if "control_bleeding" in self._active_supports:
+                flow_rate = 25.0
+            else:
+                blood_volume = float(updates["blood_volume_ml"] or 4700.0)
+                flow_rate = max(0.0, min(180.0, (5200.0 - blood_volume) * 0.4 + 60.0))
+            updates["active_hemorrhages"] = {"right_leg": round(flow_rate, 1)} if flow_rate > 5.0 else {}
+        else:
+            updates["active_hemorrhages"] = {}
+
+        if updates.get("systolic_bp_mmhg", 110.0) < 95.0 or updates.get("blood_volume_ml", 5500.0) < 5000.0:
+            updates["lactate_trend"] = "worsening"
+        elif self._active_supports & {"give_fluids", "control_bleeding", "give_oxygen", "needle_decompression"}:
+            updates["lactate_trend"] = "improving"
+        else:
+            updates["lactate_trend"] = "stable"
+
         alerts: list[str] = []
         if updates["spo2"] < 0.92:
             alerts.append("hypoxemia")
@@ -401,6 +627,8 @@ class MockPulseAdapter(PatientBackend):
             alerts.append("blood_loss")
         if updates["respiration_rate_bpm"] >= 24:
             alerts.append("tachypnea")
+        if updates.get("shock_index") is not None and updates["shock_index"] >= 0.9:
+            alerts.append("shock_index_elevated")
         if updates["systolic_bp_mmhg"] < 70 or updates["spo2"] < 0.75:
             alerts.append("cardiovascular_collapse")
 
@@ -410,10 +638,7 @@ class MockPulseAdapter(PatientBackend):
         return PatientState(**updates)
 
     def _available_tools(self) -> list[str]:
-        if self._scenario is None:
-            return list(INITIAL_TOOL_NAMES)
-        scenario_tools = set(self._scenario.tool_effects)
-        return [tool_name for tool_name in INITIAL_TOOL_NAMES if tool_name in scenario_tools]
+        return list(KNOWN_TOOL_NAMES)
 
     def _derive_mental_status(self, spo2: float, systolic_bp_mmhg: float) -> str:
         if spo2 < 0.75 or systolic_bp_mmhg < 60:
@@ -435,4 +660,10 @@ class MockPulseAdapter(PatientBackend):
             return "Patient repositioned for support."
         if tool_name == "airway_support":
             return "Airway support applied."
+        if tool_name == "give_pressor":
+            return "Vasopressor support initiated."
+        if tool_name == "needle_decompression":
+            return "Needle decompression performed."
+        if tool_name == "pericardiocentesis":
+            return "Pericardiocentesis performed."
         return f"{tool_name} executed."

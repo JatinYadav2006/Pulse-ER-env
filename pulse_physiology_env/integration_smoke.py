@@ -133,15 +133,16 @@ class _FakeRealEnvironment:
     ) -> PulsePhysiologyObservation:
         """Build a real-style observation payload for wrapper regression checks."""
 
+        raw_tools = list(KNOWN_TOOL_NAMES) + ["perform_cpr", "apply_nasal_cannula"]
         metadata = {
             "step_count": step_count,
-            "available_tools": list(KNOWN_TOOL_NAMES),
+            "available_tools": raw_tools,
             "scenario_description": "Fake real environment for wrapper regression.",
         }
         return PulsePhysiologyObservation.from_patient_state(
             self._state,
             reward=reward,
-            available_tools=list(KNOWN_TOOL_NAMES),
+            available_tools=raw_tools,
             tool_result=tool_result,
             error=error,
             metadata=metadata,
@@ -222,7 +223,11 @@ def _regression_check_real_backend_wrapper() -> None:
     _check_response_shape(reset_result, "real_wrapper_reset")
     _assert(
         reset_result.observation.available_tools == list(KNOWN_TOOL_NAMES),
-        "real_wrapper_reset: available_tools should preserve the real environment tool list",
+        "real_wrapper_reset: available_tools should be filtered to the frozen consumer tool set",
+    )
+    _assert(
+        set(reset_result.observation.metadata.get("raw_available_tools", [])) >= {"perform_cpr", "apply_nasal_cannula"},
+        "real_wrapper_reset: raw runtime tools should remain visible in metadata",
     )
     step_result = backend.step(ToolAction(tool_name="get_vitals", arguments={}))
     _check_response_shape(step_result, "real_wrapper_step")

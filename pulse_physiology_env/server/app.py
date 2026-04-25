@@ -41,9 +41,11 @@ except Exception as e:  # pragma: no cover
 
 try:
     from ..models import PulsePhysiologyObservation, ToolAction
+    from .pathology_architect import PathologyArchitect
     from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
 except ModuleNotFoundError:
     from models import PulsePhysiologyObservation, ToolAction
+    from server.pathology_architect import PathologyArchitect
     from server.pulse_physiology_env_environment import PulsePhysiologyEnvironment
 
 
