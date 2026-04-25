@@ -1,0 +1,26 @@
+# Pulse engine build artifacts
+engine-build/
+*.lib
+*.dll
+*.exe
+*.pdb
+*.obj
+*.a
+*.so
+*.dylib
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# VS / IDE
+.vs/
+*.user
+*.suo
