@@ -24,7 +24,9 @@ INITIAL_TOOL_NAMES = [
 ]
 
 EXTENDED_TOOL_NAMES = INITIAL_TOOL_NAMES + [
+    "give_pressor",
     "needle_decompression",
+    "pericardiocentesis",
     "get_respiratory_status",
     "get_blood_gas",
     "get_cbc",
@@ -57,7 +59,9 @@ class PulseToolExecutor:
             "summarize_state": self._handle_summarize_state,
             "check_deterioration": self._handle_check_deterioration,
             "recommend_next_step": self._handle_recommend_next_step,
+            "give_pressor": self._handle_give_pressor,
             "needle_decompression": self._handle_needle_decompression,
+            "pericardiocentesis": self._handle_pericardiocentesis,
             "get_respiratory_status": self._handle_get_respiratory_status,
             "get_blood_gas": self._handle_get_blood_gas,
             "get_cbc": self._handle_get_cbc,
@@ -118,34 +122,39 @@ class PulseToolExecutor:
         return self._success("get_respiratory_status", state, message, previous_state=state)
 
     def _handle_get_blood_gas(self, _arguments: dict[str, Any]) -> ToolExecution:
-        state = self._adapter.get_full_state()
-        abg = state.abg_result
-        message = (
-            f"ABG pH {self._fmt(abg.ph, precision=3)}, PaO2 {self._fmt(abg.partial_pressure_of_oxygen_mmhg)} mmHg, "
-            f"PaCO2 {self._fmt(abg.partial_pressure_of_carbon_dioxide_mmhg)} mmHg, lactate "
-            f"{self._fmt(abg.lactate_mg_per_dl)} mg/dL."
+        return self._handle_delayed_diagnostic(
+            tool_name="get_blood_gas",
+            label="ABG",
+            render_result=lambda state: (
+                f"ABG pH {self._fmt(state.abg_result.ph, precision=3)}, PaO2 "
+                f"{self._fmt(state.abg_result.partial_pressure_of_oxygen_mmhg)} mmHg, PaCO2 "
+                f"{self._fmt(state.abg_result.partial_pressure_of_carbon_dioxide_mmhg)} mmHg, lactate "
+                f"{self._fmt(state.abg_result.lactate_mg_per_dl)} mg/dL."
+            ),
         )
-        return self._success("get_blood_gas", state, message, previous_state=state)
 
     def _handle_get_cbc(self, _arguments: dict[str, Any]) -> ToolExecution:
-        state = self._adapter.get_full_state()
-        cbc = state.cbc_result
-        message = (
-            f"CBC hemoglobin {self._fmt(cbc.hemoglobin_g_per_dl)} g/dL, hematocrit "
-            f"{self._fmt(cbc.hematocrit_fraction, precision=3)}, WBC "
-            f"{self._fmt(cbc.white_blood_cell_count_per_u_l)} /uL."
+        return self._handle_delayed_diagnostic(
+            tool_name="get_cbc",
+            label="CBC",
+            render_result=lambda state: (
+                f"CBC hemoglobin {self._fmt(state.cbc_result.hemoglobin_g_per_dl)} g/dL, hematocrit "
+                f"{self._fmt(state.cbc_result.hematocrit_fraction, precision=3)}, WBC "
+                f"{self._fmt(state.cbc_result.white_blood_cell_count_per_u_l)} /uL."
+            ),
         )
-        return self._success("get_cbc", state, message, previous_state=state)
 
     def _handle_get_bmp(self, _arguments: dict[str, Any]) -> ToolExecution:
-        state = self._adapter.get_full_state()
-        bmp = state.bmp_result
-        message = (
-            f"BMP sodium {self._fmt(bmp.sodium_mmol_per_l)} mmol/L, potassium "
-            f"{self._fmt(bmp.potassium_mmol_per_l)} mmol/L, creatinine "
-            f"{self._fmt(bmp.creatinine_mg_per_dl)} mg/dL, glucose {self._fmt(bmp.glucose_mg_per_dl)} mg/dL."
+        return self._handle_delayed_diagnostic(
+            tool_name="get_bmp",
+            label="BMP",
+            render_result=lambda state: (
+                f"BMP sodium {self._fmt(state.bmp_result.sodium_mmol_per_l)} mmol/L, potassium "
+                f"{self._fmt(state.bmp_result.potassium_mmol_per_l)} mmol/L, creatinine "
+                f"{self._fmt(state.bmp_result.creatinine_mg_per_dl)} mg/dL, glucose "
+                f"{self._fmt(state.bmp_result.glucose_mg_per_dl)} mg/dL."
+            ),
         )
-        return self._success("get_bmp", state, message, previous_state=state)
 
     def _handle_advance_time(self, arguments: dict[str, Any]) -> ToolExecution:
         previous = self._adapter.get_full_state()
@@ -183,19 +192,12 @@ class PulseToolExecutor:
     def _handle_give_fluids(self, arguments: dict[str, Any]) -> ToolExecution:
         previous = self._adapter.get_full_state()
         fluid_type = str(arguments.get("fluid_type") or arguments.get("fluid") or "saline").strip().lower()
-        compound_map = {
-            "saline": "Saline",
-            "blood": "Blood",
-        }
-        if fluid_type not in compound_map:
-            valid = ", ".join(sorted(compound_map))
-            raise ValueError(f"fluid_type must be one of: {valid}")
-
         volume_ml = self._read_optional_float(arguments, keys=("volume_ml", "bag_volume_ml")) or 500.0
         rate_ml_per_min = self._read_optional_float(arguments, keys=("rate_ml_per_min",)) or 100.0
-        monitor_seconds = self._read_optional_float(arguments, keys=("monitor_seconds",))
+        monitor_seconds = self._read_optional_float(arguments, keys=("monitor_seconds",)) or 60.0
+        compound = self._adapter.resolve_fluid_compound(fluid_type)
         state = self._adapter.infuse_compound(
-            compound=compound_map[fluid_type],
+            compound=compound,
             bag_volume_ml=volume_ml,
             rate_ml_per_min=rate_ml_per_min,
             advance_time_seconds=monitor_seconds,
@@ -203,7 +205,7 @@ class PulseToolExecutor:
         return self._success(
             "give_fluids",
             state,
-            f"Started {fluid_type} infusion: {volume_ml:.0f} mL at {rate_ml_per_min:.0f} mL/min.",
+            f"Started {compound} infusion: {volume_ml:.0f} mL at {rate_ml_per_min:.0f} mL/min.",
             previous_state=previous,
         )
 
@@ -277,15 +279,77 @@ class PulseToolExecutor:
 
     def _handle_airway_support(self, arguments: dict[str, Any]) -> ToolExecution:
         previous = self._adapter.get_full_state()
-        support_type = str(arguments.get("support_type") or arguments.get("mode") or self._suggest_airway_support(previous))
+        support_type = str(
+            arguments.get("support_type") or arguments.get("mode") or self._suggest_airway_support(previous)
+        )
+        support_key = support_type.strip().lower().replace("-", "_").replace(" ", "_")
         monitor_seconds = self._read_optional_float(arguments, keys=("monitor_seconds",)) or 60.0
-        state = self._adapter.set_intubation(support_type, advance_time_seconds=monitor_seconds)
+        if support_key in {"bag_valve_mask", "bvm"}:
+            state = self._adapter.apply_bag_valve_mask(
+                fio2=self._read_optional_float(arguments, keys=("fio2", "fraction_inspired_oxygen")),
+                peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")),
+                respiration_rate_bpm=self._read_optional_float(arguments, keys=("respiration_rate_bpm", "rate_bpm")),
+                inspiratory_expiratory_ratio=self._read_optional_float(arguments, keys=("ie_ratio", "inspiratory_expiratory_ratio")),
+                squeeze_pressure_cmh2o=self._read_optional_float(arguments, keys=("squeeze_pressure_cmh2o", "pressure_cmh2o")),
+                squeeze_volume_ml=self._read_optional_float(arguments, keys=("squeeze_volume_ml", "tidal_volume_ml")),
+                airway_adjunct=arguments.get("airway_adjunct"),
+                advance_time_seconds=monitor_seconds,
+            )
+        elif support_key == "cpap":
+            state = self._adapter.apply_cpap(
+                fio2=self._read_optional_float(arguments, keys=("fio2", "fraction_inspired_oxygen")),
+                peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")),
+                pressure_support_cmh2o=self._read_optional_float(arguments, keys=("pressure_support_cmh2o", "pressure_support")),
+                advance_time_seconds=monitor_seconds,
+            )
+        elif support_key in {"pressure_control_ventilation", "pressure_control", "ventilator", "mechanical_ventilation"}:
+            state = self._adapter.apply_pressure_control_ventilation(
+                fio2=self._read_optional_float(arguments, keys=("fio2", "fraction_inspired_oxygen")),
+                peep_cmh2o=self._read_optional_float(arguments, keys=("peep_cmh2o", "peep")),
+                inspiratory_pressure_cmh2o=self._read_optional_float(arguments, keys=("inspiratory_pressure_cmh2o", "pressure_cmh2o")),
+                respiration_rate_bpm=self._read_optional_float(arguments, keys=("respiration_rate_bpm", "rate_bpm")),
+                inspiratory_period_s=self._read_optional_float(arguments, keys=("inspiratory_period_s",)),
+                advance_time_seconds=monitor_seconds,
+            )
+        else:
+            state = self._adapter.set_intubation(support_type, advance_time_seconds=monitor_seconds)
         return self._success(
             "airway_support",
             state,
             f"Airway support set to {state.airway_support or 'off'}.",
             previous_state=previous,
         )
+
+    def _handle_give_pressor(self, arguments: dict[str, Any]) -> ToolExecution:
+        previous = self._adapter.get_full_state()
+        pressor = str(arguments.get("pressor") or arguments.get("agent") or "norepinephrine")
+        rate_ml_per_min = self._read_optional_float(arguments, keys=("rate_ml_per_min",))
+        concentration_ug_per_ml = self._read_optional_float(arguments, keys=("concentration_ug_per_ml",))
+        if bool(arguments.get("stop")):
+            rate_ml_per_min = 0.0
+        monitor_seconds = self._read_optional_float(arguments, keys=("monitor_seconds",)) or 60.0
+        state = self._adapter.set_pressor(
+            pressor=pressor,
+            concentration_ug_per_ml=concentration_ug_per_ml,
+            rate_ml_per_min=rate_ml_per_min,
+            advance_time_seconds=monitor_seconds,
+        )
+        if rate_ml_per_min == 0.0:
+            message = f"Stopped {pressor} infusion."
+        else:
+            pressor_key = pressor.strip().lower().replace("-", "_").replace(" ", "_")
+            active_rate = state.active_infusions.get(pressor_key)
+            rate_text = self._fmt(active_rate) if active_rate is not None else self._fmt(rate_ml_per_min)
+            concentration_text = (
+                self._fmt(concentration_ug_per_ml)
+                if concentration_ug_per_ml is not None
+                else "default"
+            )
+            message = (
+                f"Started {pressor} at {rate_text} mL/min with concentration "
+                f"{concentration_text} ug/mL."
+            )
+        return self._success("give_pressor", state, message, previous_state=previous)
 
     def _handle_needle_decompression(self, arguments: dict[str, Any]) -> ToolExecution:
         previous = self._adapter.get_full_state()
@@ -299,12 +363,34 @@ class PulseToolExecutor:
             previous_state=previous,
         )
 
+    def _handle_pericardiocentesis(self, arguments: dict[str, Any]) -> ToolExecution:
+        previous = self._adapter.get_full_state()
+        drain_rate_ml_per_min = (
+            self._read_optional_float(arguments, keys=("drain_rate_ml_per_min", "rate_ml_per_min")) or 150.0
+        )
+        monitor_seconds = self._read_optional_float(arguments, keys=("monitor_seconds",)) or 180.0
+        state = self._adapter.perform_pericardiocentesis(
+            drain_rate_ml_per_min=drain_rate_ml_per_min,
+            advance_time_seconds=monitor_seconds,
+        )
+        return self._success(
+            "pericardiocentesis",
+            state,
+            f"Pericardiocentesis performed with drainage at {self._fmt(drain_rate_ml_per_min)} mL/min.",
+            previous_state=previous,
+        )
+
     def _handle_summarize_state(self, _arguments: dict[str, Any]) -> ToolExecution:
         state = self._adapter.get_full_state()
         alerts = ", ".join(state.active_alerts) if state.active_alerts else "no active alerts"
+        pending = ", ".join(
+            f"{name}:{seconds}s" for name, seconds in sorted(state.pending_diagnostics.items())
+        ) or "none"
+        ready = ", ".join(state.ready_diagnostics) if state.ready_diagnostics else "none"
         message = (
-            f"{state.scenario_id}: HR {self._fmt(state.heart_rate_bpm)}, MAP {self._fmt(state.mean_arterial_pressure_mmhg)}, "
-            f"SpO2 {self._fmt(state.spo2, precision=3)}, mental status {state.mental_status}, alerts {alerts}."
+            f"{state.scenario_id} ({state.scenario_difficulty}): HR {self._fmt(state.heart_rate_bpm)}, "
+            f"MAP {self._fmt(state.mean_arterial_pressure_mmhg)}, SpO2 {self._fmt(state.spo2, precision=3)}, "
+            f"mental status {state.mental_status}, alerts {alerts}, pending diagnostics {pending}, ready diagnostics {ready}."
         )
         return self._success("summarize_state", state, message, previous_state=state)
 
@@ -319,6 +405,8 @@ class PulseToolExecutor:
             deterioration_domains.append("neurologic")
         if state.lactate_trend == "worsening":
             deterioration_domains.append("perfusion")
+        if state.pending_diagnostics:
+            deterioration_domains.append("diagnostics")
         if not deterioration_domains:
             message = "No major deterioration flags detected right now."
         else:
@@ -338,13 +426,24 @@ class PulseToolExecutor:
     def _recommend_next_tool(self, state: PatientState) -> str:
         if "possible_tension_pneumothorax" in state.active_alerts or "unilateral_absent_breath_sounds" in state.active_alerts:
             return "needle_decompression"
+        if "possible_cardiac_tamponade" in state.active_alerts:
+            return "pericardiocentesis"
         if state.active_hemorrhages:
             return "control_bleeding"
+        if state.spo2 is not None and state.spo2 < 0.88 and state.airway_support not in {
+            "bag_valve_mask",
+            "pressure_control_ventilation",
+        }:
+            return "airway_support"
         if state.spo2 is not None and state.spo2 < 0.92:
             return "give_oxygen"
         if state.mean_arterial_pressure_mmhg is not None and state.mean_arterial_pressure_mmhg < 65:
+            if "blood" in state.active_infusions or "saline" in state.active_infusions or "packed_rbc" in state.active_infusions:
+                return "give_pressor"
             return "give_fluids"
-        if state.mental_status in {"pain", "unresponsive"} and not state.intubated:
+        if state.ready_diagnostics and "get_blood_gas" in state.ready_diagnostics:
+            return "get_blood_gas"
+        if state.mental_status in {"pain", "unresponsive"} and state.airway_support is None:
             return "airway_support"
         return "get_vitals"
 
@@ -370,11 +469,44 @@ class PulseToolExecutor:
 
     @staticmethod
     def _suggest_airway_support(state: PatientState) -> str:
+        if state.spo2 is not None and state.spo2 < 0.85:
+            return "pressure_control_ventilation" if state.mental_status in {"pain", "unresponsive"} else "bag_valve_mask"
+        if state.spo2 is not None and state.spo2 < 0.9:
+            return "cpap" if state.mental_status in {"alert", "verbal"} else "bag_valve_mask"
         if state.mental_status in {"pain", "unresponsive"}:
             return "tracheal"
         if state.mental_status == "verbal":
             return "oropharyngeal"
         return "nasopharyngeal"
+
+    def _handle_delayed_diagnostic(
+        self,
+        *,
+        tool_name: str,
+        label: str,
+        render_result: Callable[[PatientState], str],
+    ) -> ToolExecution:
+        previous = self._adapter.get_full_state()
+        if tool_name in previous.ready_diagnostics:
+            return self._success(tool_name, previous, render_result(previous), previous_state=previous)
+
+        if tool_name in previous.pending_diagnostics:
+            remaining = previous.pending_diagnostics[tool_name]
+            return self._success(
+                tool_name,
+                previous,
+                f"{label} is pending. {remaining} simulated seconds remaining before results are ready.",
+                previous_state=previous,
+            )
+
+        state = self._adapter.order_diagnostic(tool_name)
+        remaining = state.pending_diagnostics.get(tool_name)
+        return self._success(
+            tool_name,
+            state,
+            f"Ordered {label}. Results will be ready after about {remaining} simulated seconds.",
+            previous_state=previous,
+        )
 
     @staticmethod
     def _suggest_needle_side(state: PatientState) -> str:

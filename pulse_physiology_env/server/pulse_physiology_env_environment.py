@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -11,13 +12,15 @@ try:
     from ..models import PulsePhysiologyAction, PulsePhysiologyObservation
     from ..patient_state import PatientState
     from .pulse_engine_adapter import PulseEngineAdapter
-    from .scenarios import DEFAULT_SCENARIO_ID, ScenarioDefinition, get_scenario_definition
+    from .reward_engine import RewardBreakdown, RewardEngine, RewardTracker
+    from .scenarios import DEFAULT_SCENARIO_ID, PatientProfile, ScenarioDefinition, get_scenario_definition
     from .tools import PulseToolExecutor
 except ImportError:
     from models import PulsePhysiologyAction, PulsePhysiologyObservation
     from patient_state import PatientState
     from server.pulse_engine_adapter import PulseEngineAdapter
-    from server.scenarios import DEFAULT_SCENARIO_ID, ScenarioDefinition, get_scenario_definition
+    from server.reward_engine import RewardBreakdown, RewardEngine, RewardTracker
+    from server.scenarios import DEFAULT_SCENARIO_ID, PatientProfile, ScenarioDefinition, get_scenario_definition
     from server.tools import PulseToolExecutor
 
 
@@ -29,9 +32,13 @@ class PulsePhysiologyEnvironment(Environment):
     def __init__(self) -> None:
         self._adapter = PulseEngineAdapter()
         self._tool_executor = PulseToolExecutor(self._adapter)
+        self._reward_engine = RewardEngine()
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._scenario: ScenarioDefinition = get_scenario_definition(DEFAULT_SCENARIO_ID)
+        self._selected_patient: PatientProfile | None = None
         self._latest_patient_state: PatientState | None = None
+        self._reward_tracker: RewardTracker | None = None
+        self._last_reward_breakdown = RewardBreakdown()
 
     def reset(
         self,
@@ -41,15 +48,17 @@ class PulsePhysiologyEnvironment(Environment):
     ) -> PulsePhysiologyObservation:
         """Reset the environment and initialize the requested Pulse scenario."""
 
-        del seed
         scenario_id = kwargs.get("scenario_id")
         self._scenario = get_scenario_definition(str(scenario_id) if scenario_id is not None else DEFAULT_SCENARIO_ID)
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
+        rng = random.Random(seed)
+        self._selected_patient = self._scenario.choose_patient(rng)
 
         patient_state = self._adapter.load_patient(
-            state_file=self._scenario.state_file,
+            state_file=self._selected_patient.state_file,
             scenario_id=self._scenario.scenario_id,
-            patient_id=self._scenario.patient_id,
+            scenario_difficulty=self._scenario.difficulty,
+            patient_id=self._selected_patient.patient_id,
         )
         if self._scenario.setup is not None:
             self._scenario.setup(self._adapter)
@@ -57,6 +66,12 @@ class PulsePhysiologyEnvironment(Environment):
 
         patient_state = self._apply_episode_rules(patient_state)
         self._latest_patient_state = patient_state
+        self._reward_tracker = self._reward_engine.start_episode(self._scenario, patient_state)
+        self._last_reward_breakdown = RewardBreakdown(
+            reward_profile=self._scenario.reward_profile,
+            difficulty_multiplier=self._reward_engine.DIFFICULTY_MULTIPLIER[self._scenario.difficulty],
+            action_budget_remaining=self._reward_tracker.action_budget_remaining,
+        )
         return self._build_observation(
             patient_state,
             reward=0.0,
@@ -78,8 +93,20 @@ class PulsePhysiologyEnvironment(Environment):
         previous_state = self._latest_patient_state or self._apply_episode_rules(self._adapter.get_full_state())
         execution = self._tool_executor.execute(action)
         current_state = self._apply_episode_rules(execution.state)
-        reward = self._compute_reward(previous_state, current_state, execution.tool_result.success, execution.error is not None)
+        if self._reward_tracker is None:
+            self._reward_tracker = self._reward_engine.start_episode(self._scenario, previous_state)
+        breakdown = self._reward_engine.score_step(
+            self._reward_tracker,
+            scenario=self._scenario,
+            before=previous_state,
+            after=current_state,
+            action=action,
+            success=execution.tool_result.success,
+            had_error=execution.error is not None,
+        )
+        reward = breakdown.total
         self._latest_patient_state = current_state
+        self._last_reward_breakdown = breakdown
 
         return self._build_observation(
             current_state,
@@ -102,7 +129,7 @@ class PulsePhysiologyEnvironment(Environment):
         return EnvironmentMetadata(
             name="PulsePhysiologyEnvironment",
             description=description,
-            version="0.2.0",
+            version="0.4.0",
             author="OpenAI Codex",
         )
 
@@ -127,6 +154,12 @@ class PulsePhysiologyEnvironment(Environment):
         metadata = {
             "step_count": self._state.step_count,
             "scenario_description": self._scenario.description,
+            "scenario_difficulty": self._scenario.difficulty,
+            "reward_profile": self._scenario.reward_profile,
+            "patient_pool_size": len(self._scenario.patient_pool),
+            "selected_state_file": self._selected_patient.state_file if self._selected_patient is not None else None,
+            "action_budget_remaining": self._reward_tracker.action_budget_remaining if self._reward_tracker is not None else None,
+            "reward_breakdown": self._last_reward_breakdown.as_metadata(),
             "available_tools": self._tool_executor.available_tools,
         }
         return PulsePhysiologyObservation.from_patient_state(
@@ -137,76 +170,3 @@ class PulsePhysiologyEnvironment(Environment):
             error=error,
             metadata=metadata,
         )
-
-    def _compute_reward(
-        self,
-        before: PatientState,
-        after: PatientState,
-        success: bool,
-        had_error: bool,
-    ) -> float:
-        reward = -0.05
-
-        reward += 8.0 * (self._score_spo2(after.spo2) - self._score_spo2(before.spo2))
-        reward += 6.0 * (
-            self._score_pressure(after.mean_arterial_pressure_mmhg)
-            - self._score_pressure(before.mean_arterial_pressure_mmhg)
-        )
-        reward += 5.0 * (
-            self._score_shock_index(before.shock_index) - self._score_shock_index(after.shock_index)
-        )
-        reward += 2.0 * (
-            self._score_mental_status(after.mental_status) - self._score_mental_status(before.mental_status)
-        )
-
-        if before.blood_volume_ml is not None and after.blood_volume_ml is not None:
-            reward += (after.blood_volume_ml - before.blood_volume_ml) / 500.0
-
-        reward += 0.3 * max(0, len(before.active_alerts) - len(after.active_alerts))
-        reward -= 0.3 * max(0, len(after.active_alerts) - len(before.active_alerts))
-
-        if after.done and not before.done:
-            reward -= 25.0
-        if had_error:
-            reward -= 0.75
-        elif not success:
-            reward -= 0.25
-
-        return float(max(-30.0, min(30.0, reward)))
-
-    @staticmethod
-    def _score_spo2(value: float | None) -> float:
-        if value is None:
-            return 0.0
-        return max(0.0, min((value - 0.75) / 0.2, 1.0))
-
-    @staticmethod
-    def _score_pressure(value: float | None) -> float:
-        if value is None:
-            return 0.0
-        if value < 40:
-            return 0.0
-        if value < 65:
-            return (value - 40) / 25.0 * 0.6
-        if value <= 90:
-            return 0.6 + ((value - 65) / 25.0) * 0.4
-        return max(0.0, 1.0 - min((value - 90) / 40.0, 1.0) * 0.2)
-
-    @staticmethod
-    def _score_shock_index(value: float | None) -> float:
-        if value is None:
-            return 0.0
-        if value <= 0.7:
-            return 1.0
-        if value >= 1.5:
-            return 0.0
-        return 1.0 - ((value - 0.7) / 0.8)
-
-    @staticmethod
-    def _score_mental_status(value: str) -> float:
-        return {
-            "alert": 1.0,
-            "verbal": 0.66,
-            "pain": 0.33,
-            "unresponsive": 0.0,
-        }.get(value, 0.0)

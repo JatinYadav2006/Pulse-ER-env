@@ -14,6 +14,7 @@ from .patient_state import (
     LactateTrend,
     MentalStatus,
     PatientState,
+    ScenarioDifficulty,
 )
 
 
@@ -57,6 +58,7 @@ class PulsePhysiologyObservation(Observation):
     """Observation returned by the Pulse physiology environment."""
 
     scenario_id: str = Field(default="baseline")
+    scenario_difficulty: ScenarioDifficulty = Field(default="medium")
     patient_id: str = Field(default="standard_male")
     sim_time_s: float = Field(default=0.0)
 
@@ -91,6 +93,7 @@ class PulsePhysiologyObservation(Observation):
     bmp_result: BasicMetabolicPanelResult = Field(default_factory=BasicMetabolicPanelResult)
 
     pending_diagnostics: dict[str, int] = Field(default_factory=dict)
+    ready_diagnostics: list[str] = Field(default_factory=list)
     active_infusions: dict[str, float] = Field(default_factory=dict)
     active_hemorrhages: dict[str, float] = Field(default_factory=dict)
 

@@ -14,6 +14,7 @@ from .patient_state import (
     CompleteBloodCountResult,
     MentalStatus,
     PatientState,
+    ScenarioDifficulty,
 )
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "CompleteBloodCountResult",
     "MentalStatus",
     "PatientState",
+    "ScenarioDifficulty",
     "PulsePhysiologyAction",
     "PulsePhysiologyObservation",
     "ToolError",

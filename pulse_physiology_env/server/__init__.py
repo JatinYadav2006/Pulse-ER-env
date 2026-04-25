@@ -8,6 +8,7 @@
 
 from .pulse_engine_adapter import PulseEngineAdapter
 from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
+from .reward_engine import RewardEngine
 from .tools import PulseToolExecutor
 
-__all__ = ["PulseEngineAdapter", "PulsePhysiologyEnvironment", "PulseToolExecutor"]
+__all__ = ["PulseEngineAdapter", "PulsePhysiologyEnvironment", "PulseToolExecutor", "RewardEngine"]
