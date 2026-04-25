@@ -4,8 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from openenv.core.env_server.types import Action, Observation
 from pydantic import BaseModel, ConfigDict, Field
+
+try:
+    from openenv.core.env_server.types import Action, Observation
+except ImportError:  # pragma: no cover - allows local mock development without openenv
+    class Action(BaseModel):
+        """Fallback action base model for local development."""
+
+    class Observation(BaseModel):
+        """Fallback observation base model for local development."""
+
 
 from .patient_state import (
     ArterialBloodGasResult,
@@ -15,6 +24,7 @@ from .patient_state import (
     MentalStatus,
     PatientState,
 )
+from .tool_catalog import INITIAL_TOOL_NAMES
 
 
 class PulsePhysiologyAction(Action):
@@ -29,6 +39,9 @@ class PulsePhysiologyAction(Action):
         default=None,
         description="Optional human-readable rationale for the action.",
     )
+
+
+ToolAction = PulsePhysiologyAction
 
 
 class ToolResult(BaseModel):
@@ -51,6 +64,16 @@ class ToolError(BaseModel):
     code: str
     message: str
     retryable: bool
+
+
+class ObservationMetadata(BaseModel):
+    """Non-state metadata returned alongside each step response."""
+
+    step_count: int = Field(default=0, ge=0, description="Episode step count")
+    available_tools: list[str] = Field(
+        default_factory=lambda: list(INITIAL_TOOL_NAMES),
+        description="Tools the environment currently exposes",
+    )
 
 
 class PulsePhysiologyObservation(Observation):
@@ -97,25 +120,39 @@ class PulsePhysiologyObservation(Observation):
     available_tools: list[str] = Field(default_factory=list)
     tool_result: ToolResult | None = Field(default=None)
     error: ToolError | None = Field(default=None)
+    reward: float | None = Field(default=None)
+    done: bool = Field(default=False)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def from_patient_state(
         cls,
         state: PatientState,
         *,
-        reward: float | None,
-        available_tools: list[str],
-        tool_result: ToolResult | None,
-        error: ToolError | None,
+        reward: float | None = None,
+        available_tools: list[str] | None = None,
+        tool_result: ToolResult | None = None,
+        error: ToolError | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> "PulsePhysiologyObservation":
         payload = state.model_dump()
         payload.update(
             reward=reward,
             done=state.done,
-            available_tools=available_tools,
+            available_tools=available_tools or [],
             tool_result=tool_result,
             error=error,
             metadata=metadata or {},
         )
         return cls(**payload)
+
+
+class EnvironmentResponse(BaseModel):
+    """Canonical step envelope for the mock and real adapters."""
+
+    observation: PulsePhysiologyObservation
+    reward: float
+    done: bool
+    metadata: ObservationMetadata = Field(default_factory=ObservationMetadata)
+    tool_result: ToolResult | None = Field(default=None)
+    error: ToolError | None = Field(default=None)

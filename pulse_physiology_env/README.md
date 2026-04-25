@@ -1,6 +1,6 @@
 ---
-title: Pulse Physiology Env Environment Server
-emoji: 🖲️
+title: Pulse-ER Environment Server
+emoji: 🩺
 colorFrom: green
 colorTo: blue
 sdk: docker
@@ -9,247 +9,249 @@ app_port: 8000
 base_path: /web
 tags:
   - openenv
+  - physiology
+  - simulation
 ---
 
-# Pulse Physiology Env Environment
+# Pulse-ER Environment
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+Pulse-ER is an OpenEnv-compatible physiology environment for training and evaluating clinical reasoning over a simulated patient state.
 
-## Quick Start
+At the current stage, this folder contains a **hybrid state**:
 
-The simplest way to use the Pulse Physiology Env environment is through the `PulsePhysiologyEnv` class:
+- a real Pulse-backed runtime path from Person 1
+- a mock-side regression and evaluation path from Person 2
+- a frozen shared contract that both sides should continue to honor
 
-```python
-from pulse_physiology_env import PulsePhysiologyAction, PulsePhysiologyEnv
+## Why This Exists
 
-try:
-    # Create environment from Docker image
-    pulse_physiology_envenv = PulsePhysiologyEnv.from_docker_image("pulse_physiology_env-env:latest")
+The hackathon product goal is not just to expose raw vitals. It is to create a tool-driven clinical environment where an agent can:
 
-    # Reset
-    result = pulse_physiology_envenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
+- inspect a patient state
+- decide on an intervention
+- apply actions over time
+- observe deterioration or stabilization
+- be scored on the quality of care
 
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
+This repository is structured so two people can work in parallel:
 
-    for msg in messages:
-        result = pulse_physiology_envenv.step(PulsePhysiologyAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
+- **Person 1** owns the real Pulse runtime integration
+- **Person 2** owns the consumer-side contract, mock environment, evaluation, and training-facing product layer
 
-finally:
-    # Always clean up
-    pulse_physiology_envenv.close()
+## Current Status
+
+Implemented now:
+
+- frozen contract in [SPEC.md](./SPEC.md)
+- demo and judging walkthrough in [DEMO_SCRIPT.md](./DEMO_SCRIPT.md)
+- real integration checklist in [INTEGRATION_CHECKPOINT.md](./INTEGRATION_CHECKPOINT.md)
+- structured models in [models.py](./models.py)
+- real Pulse engine adapter in [server/pulse_engine_adapter.py](./server/pulse_engine_adapter.py)
+- real tool execution in [server/tools.py](./server/tools.py)
+- Pulse-backed OpenEnv environment in [server/pulse_physiology_env_environment.py](./server/pulse_physiology_env_environment.py)
+- `MockPulseAdapter` in [server/adapters.py](./server/adapters.py)
+- deterministic mock scenarios in [server/mock_scenarios.py](./server/mock_scenarios.py)
+- smoke tests in [smoke_test.py](./smoke_test.py)
+- reward logic in [rewards.py](./rewards.py)
+- policy comparison harness in [eval_mock.py](./eval_mock.py)
+
+Still in progress:
+
+- formal swap from the mock adapter boundary to the real runtime boundary for training-facing loops
+- final alignment review between the frozen contract and the richer real runtime state
+- integration verification that mock-side consumer code continues to work cleanly against the real path
+
+## Tier Framing
+
+The product is organized around a 3-tier tool story.
+
+### Tier 1: Read and Assess
+
+These are safe information tools used to understand the patient.
+
+- `get_vitals`
+- `summarize_state`
+- `check_deterioration`
+
+### Tier 2: Intervene
+
+These change patient state and should have visible physiological effects.
+
+- `advance_time`
+- `give_oxygen`
+- `give_fluids`
+- `control_bleeding`
+- `position_patient`
+- `airway_support`
+
+### Tier 3: Clinical Reasoning Workflows
+
+These sit above raw tools and help the agent act like a clinician.
+
+- `recommend_next_step`
+- future compound workflows such as triage summaries, scenario reports, and deterioration response plans
+
+## Frozen Contract
+
+The shared interface between Person 1 and Person 2 lives in [SPEC.md](./SPEC.md).
+
+The key public state fields are:
+
+- `scenario_id`
+- `patient_id`
+- `sim_time_s`
+- `heart_rate_bpm`
+- `systolic_bp_mmhg`
+- `diastolic_bp_mmhg`
+- `spo2`
+- `respiration_rate_bpm`
+- `blood_volume_ml`
+- `mental_status`
+- `active_alerts`
+- `done`
+
+The key public action shape is:
+
+```json
+{
+  "tool_name": "give_oxygen",
+  "arguments": {
+    "flow_lpm": 15
+  },
+  "reasoning": "Patient is hypoxemic and in respiratory distress."
+}
 ```
 
-That's it! The `PulsePhysiologyEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
+## Mock Today, Real Pulse Tomorrow
 
-## Building the Docker Image
+The current implementation is intentionally split into two backend paths:
 
-Before using the environment, you need to build the Docker image:
+- `MockPulseAdapter`: deterministic, testable, used for Person 2 regression and early policy work
+- Pulse-backed runtime path: implemented through `PulseEngineAdapter`, `PulseToolExecutor`, and the real OpenEnv environment
+
+The important design rule is:
+
+**Person 2 should be able to move from the mock runtime path to the real Pulse runtime path without rewriting models, parser logic, reward harnesses, or evaluation code.**
+
+That is why the adapter boundary exists in [server/adapters.py](./server/adapters.py).
+
+## Mock Scenarios
+
+The current mock environment includes three deterministic scenarios:
+
+- `baseline_stable`
+- `respiratory_distress`
+- `hemorrhagic_shock`
+
+These exist to support:
+
+- early policy iteration
+- smoke testing
+- reward debugging
+- demo flow design before the real runtime is ready
+
+The real Pulse-backed runtime scenarios currently live in [server/scenarios.py](./server/scenarios.py).
+
+## Development Workflow
+
+### 1. Run Smoke Tests
+
+This validates that good care beats bad care in the deterministic mock environment.
 
 ```bash
-# From project root
-docker build -t pulse_physiology_env-env:latest -f server/Dockerfile .
+python -m pulse_physiology_env.smoke_test
 ```
 
-## Deploying to Hugging Face Spaces
+### 2. Run Policy Evaluation
 
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
+This compares:
+
+- expert policy
+- llm demo policy
+- random policy
+- no-action policy
 
 ```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
-
-# Or specify options
-openenv push --namespace my-org --private
+python -m pulse_physiology_env.eval_mock
 ```
 
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
+The expected ranking is:
 
-### Prerequisites
-
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
-
-### Options
-
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
-
-### Examples
-
-```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
-
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
-
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
-
-# Push as a private space
-openenv push --private
-
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
+```text
+expert > llm_demo > random > no_action
 ```
 
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
+### 3. Run the OpenEnv Server
 
-The deployed space includes:
-- **Web Interface** at `/web` - Interactive UI for exploring the environment
-- **API Documentation** at `/docs` - Full OpenAPI/Swagger interface
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
-
-## Environment Details
-
-### Action
-**PulsePhysiologyAction**: Contains a single field
-- `message` (str) - The message to echo back
-
-### Observation
-**PulsePhysiologyObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
-
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a Pulse Physiology Env environment server running, you can connect directly:
-
-```python
-from pulse_physiology_env import PulsePhysiologyEnv
-
-# Connect to existing server
-pulse_physiology_envenv = PulsePhysiologyEnv(base_url="<ENV_HTTP_URL_HERE>")
-
-# Use as normal
-result = pulse_physiology_envenv.reset()
-result = pulse_physiology_envenv.step(PulsePhysiologyAction(message="Hello!"))
-```
-
-Note: When connecting to an existing server, `pulse_physiology_envenv.close()` will NOT stop the server.
-
-### Using the Context Manager
-
-The client supports context manager usage for automatic connection management:
-
-```python
-from pulse_physiology_env import PulsePhysiologyAction, PulsePhysiologyEnv
-
-# Connect with context manager (auto-connects and closes)
-with PulsePhysiologyEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(PulsePhysiologyAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
-```
-
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
-
-### Concurrent WebSocket Sessions
-
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
-
-```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    PulsePhysiologyEnvironment,  # Pass class, not instance
-    PulsePhysiologyAction,
-    PulsePhysiologyObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
-)
-```
-
-Then multiple clients can connect simultaneously:
-
-```python
-from pulse_physiology_env import PulsePhysiologyAction, PulsePhysiologyEnv
-from concurrent.futures import ThreadPoolExecutor
-
-def run_episode(client_id: int):
-    with PulsePhysiologyEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(PulsePhysiologyAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
-
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
-
-## Development & Testing
-
-### Direct Environment Testing
-
-Test the environment logic directly without starting the HTTP server:
-
-```bash
-# From the server directory
-python3 server/pulse_physiology_env_environment.py
-```
-
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
-
-### Running Locally
-
-Run the server locally for development:
+This requires the OpenEnv dependency stack to be installed.
 
 ```bash
 uvicorn server.app:app --reload
 ```
 
+## Backend Integration Contract For Person 1
+
+Person 1 should keep the real Pulse runtime aligned with the existing contract, not invent a new one.
+
+### Required outputs from Person 1
+
+- produce the exact public `PatientState` fields defined in [SPEC.md](./SPEC.md)
+- preserve canonical units
+- preserve exact tool names
+- return the same top-level response envelope
+- return structured errors instead of plain failures
+
+### Person 1 should not change without syncing
+
+- field names
+- units
+- tool names
+- enum values for `mental_status`
+- top-level response keys
+
+### Minimum handoff expectation
+
+As the real runtime evolves, Person 2 should still be able to keep the following working with minimal code change:
+
+- [models.py](./models.py)
+- [client.py](./client.py)
+- [smoke_test.py](./smoke_test.py)
+- [rewards.py](./rewards.py)
+- [eval_mock.py](./eval_mock.py)
+
 ## Project Structure
 
-```
+```text
 pulse_physiology_env/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # PulsePhysiologyEnv client
-├── models.py              # Action and Observation models
-└── server/
-    ├── __init__.py        # Server module exports
-    ├── pulse_physiology_env_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
+|-- README.md
+|-- SPEC.md
+|-- PERSON1_HANDOFF.md
+|-- DEMO_SCRIPT.md
+|-- INTEGRATION_CHECKPOINT.md
+|-- __init__.py
+|-- client.py
+|-- models.py
+|-- patient_state.py
+|-- rewards.py
+|-- smoke_test.py
+|-- eval_mock.py
+|-- generate_seed_trajectories.py
+`-- server/
+    |-- __init__.py
+    |-- adapters.py
+    |-- app.py
+    |-- mock_scenarios.py
+    |-- pulse_engine_adapter.py
+    |-- scenarios.py
+    |-- tools.py
+    |-- pulse_physiology_env_environment.py
+    `-- Dockerfile
 ```
+
+## What This README Is For
+
+This README is meant to help three audiences quickly:
+
+- **teammates**: understand the ownership split and integration contract
+- **judges**: understand the product direction and the clinical-tool framing
+- **future us**: remember what is mock scaffolding versus what is already real Pulse-backed behavior

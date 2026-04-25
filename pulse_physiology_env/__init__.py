@@ -6,12 +6,26 @@
 
 """Pulse Physiology Env Environment."""
 
-from .client import PulsePhysiologyEnv
-from .models import PulsePhysiologyAction, PulsePhysiologyObservation, ToolError, ToolResult
+try:
+    from .client import PulsePhysiologyEnv
+except ImportError:  # pragma: no cover - enables mock-side work without openenv installed
+    PulsePhysiologyEnv = None
+
+from .models import (
+    INITIAL_TOOL_NAMES,
+    EnvironmentResponse,
+    ObservationMetadata,
+    PulsePhysiologyAction,
+    PulsePhysiologyObservation,
+    ToolAction,
+    ToolError,
+    ToolResult,
+)
 from .patient_state import (
     ArterialBloodGasResult,
     BasicMetabolicPanelResult,
     CompleteBloodCountResult,
+    LactateTrend,
     MentalStatus,
     PatientState,
 )
@@ -20,11 +34,18 @@ __all__ = [
     "ArterialBloodGasResult",
     "BasicMetabolicPanelResult",
     "CompleteBloodCountResult",
+    "EnvironmentResponse",
+    "INITIAL_TOOL_NAMES",
+    "LactateTrend",
     "MentalStatus",
+    "ObservationMetadata",
     "PatientState",
     "PulsePhysiologyAction",
     "PulsePhysiologyObservation",
+    "ToolAction",
     "ToolError",
     "ToolResult",
-    "PulsePhysiologyEnv",
 ]
+
+if PulsePhysiologyEnv is not None:
+    __all__.append("PulsePhysiologyEnv")

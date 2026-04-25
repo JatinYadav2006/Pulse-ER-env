@@ -6,8 +6,25 @@
 
 """Pulse Physiology Env environment server components."""
 
-from .pulse_engine_adapter import PulseEngineAdapter
-from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
-from .tools import PulseToolExecutor
+__all__: list[str] = []
 
-__all__ = ["PulseEngineAdapter", "PulsePhysiologyEnvironment", "PulseToolExecutor"]
+try:
+    from .pulse_engine_adapter import PulseEngineAdapter
+except Exception:  # pragma: no cover - allows imports when Pulse is unavailable
+    PulseEngineAdapter = None
+else:
+    __all__.append("PulseEngineAdapter")
+
+try:
+    from .tools import PulseToolExecutor
+except Exception:  # pragma: no cover - depends on Pulse runtime availability
+    PulseToolExecutor = None
+else:
+    __all__.append("PulseToolExecutor")
+
+try:
+    from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
+except Exception:  # pragma: no cover - allows mock-side work without openenv installed
+    PulsePhysiologyEnvironment = None
+else:
+    __all__.append("PulsePhysiologyEnvironment")
