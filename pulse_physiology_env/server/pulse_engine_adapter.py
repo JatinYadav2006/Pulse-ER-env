@@ -103,6 +103,53 @@ try:
     )
 except Exception as exc:  # pragma: no cover - exercised only on misconfigured hosts
     _PULSE_IMPORT_ERROR = exc
+    class _MissingPulseEnum:
+        name = "missing"
+
+        def __getattr__(self, _name: str):
+            return self
+
+    _missing_enum = _MissingPulseEnum()
+    PulseEngine = None
+    SEBagValveMaskAutomated = None
+    SEBagValveMaskConfiguration = None
+    SEAction = None
+    SEDataRequest = None
+    SEDataRequestManager = None
+    eGate = _missing_enum
+    eSide = _missing_enum
+    eSwitch = _missing_enum
+    SEMechanicalVentilatorContinuousPositiveAirwayPressure = None
+    SEMechanicalVentilatorPressureControl = None
+    SEMechanicalVentilatorVolumeControl = None
+    SEArrhythmia = None
+    SEChestCompressionAutomated = None
+    SEHemorrhage = None
+    SEIntubation = None
+    SENeedleDecompression = None
+    SEPericardialEffusion = None
+    SESubstanceBolus = None
+    SESubstanceCompoundInfusion = None
+    SESubstanceInfusion = None
+    SESupplementalOxygen = None
+    SETensionPneumothorax = None
+    eDevice = _missing_enum
+    eHemorrhage_Compartment = _missing_enum
+    eHemorrhage_Type = _missing_enum
+    eHeartRhythm = _missing_enum
+    eIntubationType = _missing_enum
+    AmountPerVolumeUnit = _missing_enum
+    FrequencyUnit = _missing_enum
+    LengthUnit = _missing_enum
+    MassPerVolumeUnit = _missing_enum
+    MassUnit = _missing_enum
+    PressureTimePerVolumeUnit = _missing_enum
+    PressureUnit = _missing_enum
+    TemperatureUnit = _missing_enum
+    TimeUnit = _missing_enum
+    VolumePerPressureUnit = _missing_enum
+    VolumePerTimeUnit = _missing_enum
+    VolumeUnit = _missing_enum
 
 
 def _snake_case(value: str) -> str:

@@ -13,6 +13,7 @@ from typing import Callable
 from .models import EnvironmentResponse, ObservationMetadata, PulsePhysiologyObservation, ToolAction
 from .patient_state import PatientState
 from .server.adapters import PatientBackend
+from .tool_catalog import KNOWN_TOOL_NAMES
 
 
 _REAL_SCENARIO_ALIASES = {
@@ -109,11 +110,24 @@ class RealPulseBackend(PatientBackend):
             observation = PulsePhysiologyObservation.model_validate(observation)
 
         metadata_dict = dict(observation.metadata or {})
-        available_tools = list(
+        raw_available_tools = list(
             observation.available_tools
             or metadata_dict.get("available_tools")
             or []
         )
+        # The real runtime may expose a richer clinical tool catalog than the
+        # consumer-side runner currently understands. Filter the public
+        # available-tools list down to the frozen contract so Person 2's stack
+        # can fail closed on truly unknown tools without rejecting the entire
+        # episode. Preserve the full runtime tool list in metadata for
+        # debugging and future upgrades.
+        available_tools = [
+            tool_name
+            for tool_name in raw_available_tools
+            if tool_name in KNOWN_TOOL_NAMES
+        ]
+        metadata_dict["raw_available_tools"] = raw_available_tools
+        metadata_dict["available_tools"] = available_tools
         metadata = ObservationMetadata(
             step_count=int(metadata_dict.get("step_count", 0)),
             available_tools=available_tools,
