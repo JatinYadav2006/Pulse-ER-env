@@ -28,6 +28,9 @@ Usage:
     python -m server.app
 """
 
+from pydantic import BaseModel, Field
+from fastapi import HTTPException
+
 try:
     import openenv.core.env_server.http_server as openenv_http_server
     import openenv.core.env_server.serialization as openenv_serialization
@@ -42,6 +45,14 @@ try:
 except ModuleNotFoundError:
     from models import PulsePhysiologyObservation, ToolAction
     from server.pulse_physiology_env_environment import PulsePhysiologyEnvironment
+
+
+class PathologyGenerationRequest(BaseModel):
+    """Request model for generated trauma cases."""
+
+    patient_id: str = Field(..., description="Known baseline patient identifier.")
+    injury_type: str = Field(..., description="One of the supported generated injury types.")
+    severity: float = Field(..., ge=0.0, le=1.0, description="Severity on a 0-1 scale.")
 
 
 def _serialize_observation_with_metadata(observation):
@@ -66,6 +77,32 @@ app = create_app(
     env_name="pulse_physiology_env",
     max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
 )
+_PATHOLOGY_ARCHITECT = PathologyArchitect()
+
+
+@app.get("/pathology/library")
+def pathology_library() -> dict[str, list[str]]:
+    """Expose authoring options for the PathologyArchitect."""
+
+    return {
+        "patients": _PATHOLOGY_ARCHITECT.supported_patients(),
+        "injury_types": _PATHOLOGY_ARCHITECT.supported_injury_types(),
+    }
+
+
+@app.post("/pathology/generate")
+def generate_pathology(request: PathologyGenerationRequest) -> dict[str, object]:
+    """Return a generated pathology blueprint that can be sent to reset()."""
+
+    try:
+        blueprint = _PATHOLOGY_ARCHITECT.build_blueprint(
+            patient_id=request.patient_id,
+            injury_type=request.injury_type,
+            severity=request.severity,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return blueprint.as_dict()
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):

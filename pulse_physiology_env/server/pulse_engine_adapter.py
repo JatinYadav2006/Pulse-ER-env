@@ -67,12 +67,16 @@ try:
     from pulse.cdm.mechanical_ventilator_actions import (
         SEMechanicalVentilatorContinuousPositiveAirwayPressure,
         SEMechanicalVentilatorPressureControl,
+        SEMechanicalVentilatorVolumeControl,
     )
     from pulse.cdm.patient_actions import (
+        SEArrhythmia,
+        SEChestCompressionAutomated,
         SEHemorrhage,
         SEIntubation,
         SENeedleDecompression,
         SEPericardialEffusion,
+        SESubstanceBolus,
         SESubstanceCompoundInfusion,
         SESubstanceInfusion,
         SESupplementalOxygen,
@@ -80,11 +84,13 @@ try:
         eDevice,
         eHemorrhage_Compartment,
         eHemorrhage_Type,
+        eHeartRhythm,
         eIntubationType,
     )
     from pulse.cdm.scalars import (
         AmountPerVolumeUnit,
         FrequencyUnit,
+        LengthUnit,
         MassPerVolumeUnit,
         MassUnit,
         PressureTimePerVolumeUnit,
@@ -126,6 +132,9 @@ class _RuntimeContext:
     airway_support_mode: str | None = None
     fio2: float | None = None
     peep_cmh2o: float | None = None
+    ventilator_respiration_rate_bpm: float | None = None
+    ventilator_tidal_volume_ml: float | None = None
+    ventilator_inspiratory_pressure_cmh2o: float | None = None
     baseline_blood_volume_ml: float | None = None
 
 
@@ -147,18 +156,29 @@ class PulseEngineAdapter:
     DEFAULT_PC_RESPIRATION_RATE_BPM = 14.0
     DEFAULT_PC_INSPIRATORY_PRESSURE_CMH2O = 16.0
     DEFAULT_PC_INSPIRATORY_PERIOD_S = 1.0
+    DEFAULT_VC_FIO2 = 0.7
+    DEFAULT_VC_PEEP_CMH2O = 5.0
+    DEFAULT_VC_RESPIRATION_RATE_BPM = 14.0
+    DEFAULT_VC_TIDAL_VOLUME_ML = 450.0
+    DEFAULT_CPR_RATE_BPM = 100.0
+    DEFAULT_CPR_DEPTH_CM = 5.0
     DEFAULT_PRESSOR_MONITOR_SECONDS = 180.0
     DEFAULT_PERICARDIOCENTESIS_DRAIN_RATE_ML_PER_MIN = 150.0
     DIAGNOSTIC_DELAYS_S = {
         "get_blood_gas": 120,
         "get_cbc": 240,
         "get_bmp": 300,
+        "order_arterial_blood_gas": 120,
+        "order_complete_blood_count": 240,
+        "order_basic_metabolic_panel": 300,
+        "order_point_of_care_ultrasound": 120,
     }
 
     _AIRWAY_SUPPORT_DISPLAY = {
         "bag_valve_mask": "bag_valve_mask",
         "cpap": "cpap",
         "pressure_control_ventilation": "pressure_control_ventilation",
+        "volume_control_ventilation": "volume_control_ventilation",
     }
     _FLUID_COMPOUND_MAP = {
         "saline": "Saline",
@@ -178,6 +198,58 @@ class PulseEngineAdapter:
             "substance": "Phenylephrine",
             "default_concentration_ug_per_ml": 10.0,
             "default_rate_ml_per_min": 7.68,
+        },
+    }
+    _SUPPORTED_COMPOUNDS = frozenset({"Saline", "Blood", "PackedRBC"})
+    _BOLUS_DRUG_CONFIG: dict[str, dict[str, Any]] = {
+        "epinephrine": {
+            "substance": "Epinephrine",
+            "dose_argument": "mg",
+            "concentration_value": 1.0,
+            "concentration_unit": MassPerVolumeUnit.mg_Per_mL,
+            "duration_s": 30.0,
+        },
+        "morphine": {
+            "substance": "Morphine",
+            "dose_argument": "mg",
+            "concentration_value": 10.0,
+            "concentration_unit": MassPerVolumeUnit.mg_Per_mL,
+            "duration_s": 60.0,
+        },
+        "ketamine": {
+            "substance": "Ketamine",
+            "dose_argument": "mg_per_kg",
+            "concentration_value": 50.0,
+            "concentration_unit": MassPerVolumeUnit.mg_Per_mL,
+            "duration_s": 45.0,
+        },
+        "midazolam": {
+            "substance": "Midazolam",
+            "dose_argument": "mg",
+            "concentration_value": 1.0,
+            "concentration_unit": MassPerVolumeUnit.mg_Per_mL,
+            "duration_s": 60.0,
+        },
+        "lorazepam": {
+            "substance": "Lorazepam",
+            "dose_argument": "mg",
+            "concentration_value": 2.0,
+            "concentration_unit": MassPerVolumeUnit.mg_Per_mL,
+            "duration_s": 90.0,
+        },
+        "succinylcholine": {
+            "substance": "Succinylcholine",
+            "dose_argument": "mg_per_kg",
+            "concentration_value": 20.0,
+            "concentration_unit": MassPerVolumeUnit.mg_Per_mL,
+            "duration_s": 30.0,
+        },
+        "phenylephrine": {
+            "substance": "Phenylephrine",
+            "dose_argument": "mcg",
+            "concentration_value": 100.0,
+            "concentration_unit": MassPerVolumeUnit.ug_Per_mL,
+            "duration_s": 30.0,
         },
     }
 
@@ -631,18 +703,144 @@ class PulseEngineAdapter:
         actions.append(ventilator)
         return self.apply_actions(actions, advance_time_seconds=advance_time_seconds)
 
+    def apply_volume_control_ventilation(
+        self,
+        *,
+        fio2: float | None = None,
+        peep_cmh2o: float | None = None,
+        tidal_volume_ml: float | None = None,
+        respiration_rate_bpm: float | None = None,
+        inspiratory_period_s: float | None = None,
+        advance_time_seconds: float | None = 120.0,
+    ) -> PatientState:
+        """Provide invasive volume-control ventilation using Pulse's native ventilator action."""
+
+        resolved_fio2 = self.DEFAULT_VC_FIO2 if fio2 is None else fio2
+        resolved_peep = self.DEFAULT_VC_PEEP_CMH2O if peep_cmh2o is None else peep_cmh2o
+        resolved_tidal_volume = (
+            self.DEFAULT_VC_TIDAL_VOLUME_ML
+            if tidal_volume_ml is None
+            else tidal_volume_ml
+        )
+        resolved_rate = (
+            self.DEFAULT_VC_RESPIRATION_RATE_BPM
+            if respiration_rate_bpm is None
+            else respiration_rate_bpm
+        )
+        resolved_period = (
+            self.DEFAULT_PC_INSPIRATORY_PERIOD_S
+            if inspiratory_period_s is None
+            else inspiratory_period_s
+        )
+        if not 0.21 <= resolved_fio2 <= 1.0:
+            raise ValueError("fio2 must be between 0.21 and 1.0.")
+        if resolved_peep < 0:
+            raise ValueError("peep_cmh2o cannot be negative.")
+        if resolved_tidal_volume <= 0:
+            raise ValueError("tidal_volume_ml must be greater than zero.")
+        if resolved_rate <= 0:
+            raise ValueError("respiration_rate_bpm must be greater than zero.")
+        if resolved_period <= 0:
+            raise ValueError("inspiratory_period_s must be greater than zero.")
+
+        actions: list[SEAction] = [self._build_intubation_action("tracheal")]
+        ventilator = SEMechanicalVentilatorVolumeControl()
+        ventilator.set_connection(eSwitch.On)
+        ventilator.get_fraction_inspired_oxygen().set_value(resolved_fio2)
+        ventilator.get_positive_end_expired_pressure().set_value(resolved_peep, PressureUnit.cmH2O)
+        ventilator.get_tidal_volume().set_value(resolved_tidal_volume, VolumeUnit.mL)
+        ventilator.get_respiration_rate().set_value(resolved_rate, FrequencyUnit.Per_min)
+        ventilator.get_inspiratory_period().set_value(resolved_period, TimeUnit.s)
+        actions.append(ventilator)
+        return self.apply_actions(actions, advance_time_seconds=advance_time_seconds)
+
+    def administer_substance_bolus(
+        self,
+        *,
+        drug_name: str,
+        dose: float,
+        dose_unit: str,
+        concentration_value: float,
+        concentration_unit: Any,
+        duration_s: float,
+        advance_time_seconds: float | None = None,
+    ) -> PatientState:
+        """Deliver a supported substance bolus through Pulse's native bolus action."""
+
+        if not self.supports_substance(drug_name):
+            raise ValueError(f"Unsupported bolus substance '{drug_name}' for this local Pulse build.")
+        if dose <= 0:
+            raise ValueError("dose must be greater than zero.")
+        if concentration_value <= 0:
+            raise ValueError("concentration_value must be greater than zero.")
+        if duration_s <= 0:
+            raise ValueError("duration_s must be greater than zero.")
+
+        dose_volume_ml = dose / concentration_value
+        action = SESubstanceBolus()
+        action.set_substance(drug_name)
+        action.get_dose().set_value(dose_volume_ml, VolumeUnit.mL)
+        action.get_concentration().set_value(concentration_value, concentration_unit)
+        action.get_admin_duration().set_value(duration_s, TimeUnit.s)
+        # The local Pulse Python binding defines Intravenous with a tuple enum value.
+        # Leaving the route unset avoids the broken serializer while preserving a valid bolus action.
+        action._admin_route = None  # type: ignore[attr-defined]
+        monitor_window = duration_s if advance_time_seconds is None else advance_time_seconds
+        return self.apply_actions([action], advance_time_seconds=monitor_window)
+
+    def perform_cpr(
+        self,
+        *,
+        compression_rate_bpm: float = DEFAULT_CPR_RATE_BPM,
+        depth_cm: float = DEFAULT_CPR_DEPTH_CM,
+        advance_time_seconds: float | None = 60.0,
+    ) -> PatientState:
+        """Perform automated CPR using Pulse's chest-compression action."""
+
+        if compression_rate_bpm <= 0:
+            raise ValueError("compression_rate_bpm must be greater than zero.")
+        if depth_cm <= 0:
+            raise ValueError("depth_cm must be greater than zero.")
+
+        action = SEChestCompressionAutomated()
+        action.get_compression_frequency().set_value(compression_rate_bpm, FrequencyUnit.Per_min)
+        action.get_depth().set_value(depth_cm, LengthUnit.cm)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def induce_cardiac_arrest(
+        self,
+        *,
+        advance_time_seconds: float | None = 30.0,
+    ) -> PatientState:
+        """Force an asystolic arrest for scenario-authoring workflows."""
+
+        action = SEArrhythmia()
+        action.set_rhythm(eHeartRhythm.Asystole)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def schedule_diagnostic(
+        self,
+        diagnostic_key: str,
+        *,
+        delay_seconds: int,
+    ) -> PatientState:
+        """Schedule a delayed diagnostic and return the updated state."""
+
+        if delay_seconds <= 0:
+            raise ValueError("delay_seconds must be greater than zero.")
+
+        self._runtime.ready_diagnostics.discard(diagnostic_key)
+        self._runtime.pending_diagnostics[diagnostic_key] = int(delay_seconds)
+        return self.get_full_state()
+
     def order_diagnostic(self, tool_name: str, *, delay_seconds: int | None = None) -> PatientState:
         """Schedule a delayed diagnostic and return the updated state."""
 
-        if tool_name not in self.DIAGNOSTIC_DELAYS_S:
+        if tool_name not in self.DIAGNOSTIC_DELAYS_S and delay_seconds is None:
             valid = ", ".join(sorted(self.DIAGNOSTIC_DELAYS_S))
             raise ValueError(f"Unsupported diagnostic '{tool_name}'. Expected one of: {valid}")
-
-        self._runtime.ready_diagnostics.discard(tool_name)
-        self._runtime.pending_diagnostics[tool_name] = int(
-            delay_seconds if delay_seconds is not None else self.DIAGNOSTIC_DELAYS_S[tool_name]
-        )
-        return self.get_full_state()
+        resolved_delay = int(delay_seconds if delay_seconds is not None else self.DIAGNOSTIC_DELAYS_S[tool_name])
+        return self.schedule_diagnostic(tool_name, delay_seconds=resolved_delay)
 
     def set_hemorrhage(
         self,
@@ -889,6 +1087,164 @@ class PulseEngineAdapter:
             self._refresh_raw_metrics()
         return dict(self._latest_raw_metrics)
 
+    def supports_substance(self, drug_name: str) -> bool:
+        """Return whether a bolus drug is supported by the local Pulse build."""
+
+        return drug_name.strip() in {config["substance"] for config in self._BOLUS_DRUG_CONFIG.values()}
+
+    def supports_compound(self, compound_name: str) -> bool:
+        """Return whether a compound infusion is known to work in the local Pulse build."""
+
+        return compound_name.strip() in self._SUPPORTED_COMPOUNDS
+
+    def get_patient_weight_kg(self) -> float | None:
+        """Return the current patient weight in kilograms when available."""
+
+        return self.get_raw_metrics().get("patient_weight_kg")
+
+    def compute_drug_dose(self, *, dose: float, dose_unit: str) -> float:
+        """Convert a tool-facing dose input into a total delivered mass."""
+
+        dose_unit_key = dose_unit.strip().lower()
+        if dose_unit_key == "mg":
+            return dose
+        if dose_unit_key == "mcg":
+            return dose
+        if dose_unit_key == "mg_per_kg":
+            weight_kg = self.get_patient_weight_kg()
+            if weight_kg is None or weight_kg <= 0:
+                raise RuntimeError("Patient weight is unavailable, so mg/kg dosing cannot be computed.")
+            return dose * weight_kg
+        if dose_unit_key == "mcg_per_kg_per_min":
+            weight_kg = self.get_patient_weight_kg()
+            if weight_kg is None or weight_kg <= 0:
+                raise RuntimeError("Patient weight is unavailable, so mcg/kg/min dosing cannot be computed.")
+            return dose * weight_kg
+        raise ValueError(f"Unsupported dose_unit '{dose_unit}'.")
+
+    def get_hemodynamics_summary(self) -> dict[str, float | None]:
+        """Return a concise hemodynamic snapshot used by higher-level tools."""
+
+        metrics = self.get_raw_metrics()
+        return {
+            "mean_arterial_pressure_mmhg": metrics.get("mean_arterial_pressure_mmhg"),
+            "cardiac_output_l_per_min": metrics.get("cardiac_output_l_per_min"),
+            "stroke_volume_ml": metrics.get("stroke_volume_ml"),
+            "systemic_vascular_resistance_mmhg_min_per_l": metrics.get("systemic_vascular_resistance_mmhg_min_per_l"),
+        }
+
+    def get_blood_chemistry_summary(self) -> dict[str, float | None]:
+        """Return chemistry values commonly used in bedside trauma assessment."""
+
+        state = self.get_full_state()
+        return {
+            "ph": state.abg_result.ph,
+            "lactate_mg_per_dl": state.abg_result.lactate_mg_per_dl,
+            "hemoglobin_g_per_dl": state.cbc_result.hemoglobin_g_per_dl,
+            "base_deficit_meq_per_l": state.abg_result.base_deficit_meq_per_l,
+        }
+
+    def get_pain_score_0_to_10(self) -> float:
+        """Return a derived bedside pain score from active injuries and sedation."""
+
+        metrics = self.get_raw_metrics()
+        injury_burden = max(self._runtime.pain_sources.values(), default=0.0)
+        sedation_level = metrics.get("sedation_level") or 0.0
+        analgesia_fraction = min(max(sedation_level * 0.4, 0.0), 0.4)
+        score = max(0.0, min((injury_burden * (1.0 - analgesia_fraction)) * 10.0, 10.0))
+        return score
+
+    def get_consciousness_summary(self) -> dict[str, float | str]:
+        """Return consciousness and an approximate GCS-equivalent score."""
+
+        state = self.get_full_state()
+        gcs_equivalent = {
+            "alert": 15.0,
+            "verbal": 13.0,
+            "pain": 8.0,
+            "unresponsive": 3.0,
+        }[state.mental_status]
+        return {
+            "mental_status": state.mental_status,
+            "gcs_equivalent": gcs_equivalent,
+        }
+
+    def get_shock_assessment(self) -> dict[str, float | str | None]:
+        """Return a derived shock classification and perfusion summary."""
+
+        state = self.get_full_state()
+        metrics = self.get_raw_metrics()
+        shock_index = state.shock_index
+        urine_output_ml_per_hr = None
+        urine_rate_ml_per_min = metrics.get("urine_production_rate_ml_per_min")
+        if urine_rate_ml_per_min is not None:
+            urine_output_ml_per_hr = urine_rate_ml_per_min * 60.0
+
+        if shock_index is None:
+            shock_class = "unknown"
+        elif shock_index < 0.7:
+            shock_class = "none"
+        elif shock_index < 0.9:
+            shock_class = "compensated"
+        elif shock_index < 1.2:
+            shock_class = "class_ii"
+        elif shock_index < 1.5:
+            shock_class = "class_iii"
+        else:
+            shock_class = "class_iv"
+
+        map_mmhg = state.mean_arterial_pressure_mmhg
+        perfusion_index = metrics.get("peripheral_perfusion_index")
+        if map_mmhg is not None and map_mmhg < 55:
+            perfusion_status = "critical"
+        elif state.lactate_trend == "worsening" or (perfusion_index is not None and perfusion_index < 1.0):
+            perfusion_status = "poor"
+        elif map_mmhg is not None and map_mmhg < 65:
+            perfusion_status = "borderline"
+        else:
+            perfusion_status = "adequate"
+
+        return {
+            "shock_index": shock_index,
+            "shock_class": shock_class,
+            "perfusion_status": perfusion_status,
+            "urine_output_ml_per_hr": urine_output_ml_per_hr,
+        }
+
+    def get_ultrasound_summary(self, region: str) -> str:
+        """Return a derived point-of-care ultrasound finding for a requested region."""
+
+        region_key = region.strip().lower().replace("-", "_").replace(" ", "_")
+        state = self.get_full_state()
+
+        if region_key in {"cardiac", "heart"}:
+            if "possible_cardiac_tamponade" in state.active_alerts:
+                return "Cardiac POCUS: pericardial effusion with tamponade physiology."
+            if "active_pericardial_effusion" in state.active_alerts:
+                return "Cardiac POCUS: pericardial effusion without current tamponade physiology."
+            return "Cardiac POCUS: no large pericardial effusion seen."
+
+        if region_key in {"lung", "chest", "thorax"}:
+            if "possible_tension_pneumothorax" in state.active_alerts:
+                side = "left" if "absent left" in state.breath_sounds else "right" if "absent right" in state.breath_sounds else "affected"
+                return f"Lung POCUS: absent pleural sliding on the {side} with pneumothorax concern."
+            return "Lung POCUS: bilateral pleural sliding present without large pneumothorax signs."
+
+        if region_key in {"fast", "abdomen", "efast"}:
+            internal_sites = {"spleen", "liver", "small_intestine", "large_intestine", "splanchnic", "vena_cava"}
+            if any(site in internal_sites for site in state.active_hemorrhages):
+                return "FAST exam: free fluid is present, concerning for internal hemorrhage."
+            return "FAST exam: no free intraperitoneal fluid detected."
+
+        if region_key == "ivc":
+            blood_volume_ml = state.blood_volume_ml
+            baseline = self._runtime.baseline_blood_volume_ml
+            if blood_volume_ml is not None and baseline is not None and blood_volume_ml < baseline * 0.8:
+                return "IVC POCUS: collapsible IVC suggesting volume depletion."
+            return "IVC POCUS: IVC caliber does not suggest severe volume depletion."
+
+        raise ValueError("region must be one of: cardiac, lung, fast, abdomen, efast, ivc")
+
     def is_patient_alive(self) -> bool:
         """Check whether the patient is still in a survivable state."""
 
@@ -935,6 +1291,7 @@ class PulseEngineAdapter:
 
     def _build_data_requests(self) -> tuple[list[str], list[Any]]:
         request_specs = [
+            ("patient_weight_kg", SEDataRequest.create_patient_request("Weight", unit=MassUnit.kg)),
             ("heart_rate_bpm", SEDataRequest.create_physiology_request("HeartRate", unit=FrequencyUnit.Per_min)),
             (
                 "systolic_bp_mmhg",
@@ -1131,6 +1488,18 @@ class PulseEngineAdapter:
 
         if isinstance(action, SEBagValveMaskAutomated):
             self._runtime.airway_support_mode = "bag_valve_mask"
+            self._runtime.ventilator_respiration_rate_bpm = self._get_scalar_value(
+                action,
+                "has_breath_frequency",
+                "get_breath_frequency",
+                unit=FrequencyUnit.Per_min,
+            )
+            self._runtime.ventilator_tidal_volume_ml = self._get_scalar_value(
+                action,
+                "has_squeeze_volume",
+                "get_squeeze_volume",
+                unit=VolumeUnit.mL,
+            )
             return
 
         if isinstance(action, SEMechanicalVentilatorContinuousPositiveAirwayPressure):
@@ -1162,6 +1531,46 @@ class PulseEngineAdapter:
                     "has_positive_end_expired_pressure",
                     "get_positive_end_expired_pressure",
                     unit=PressureUnit.cmH2O,
+                )
+                self._runtime.ventilator_respiration_rate_bpm = self._get_scalar_value(
+                    action,
+                    "has_respiration_rate",
+                    "get_respiration_rate",
+                    unit=FrequencyUnit.Per_min,
+                )
+                self._runtime.ventilator_inspiratory_pressure_cmh2o = self._get_scalar_value(
+                    action,
+                    "has_inspiratory_pressure",
+                    "get_inspiratory_pressure",
+                    unit=PressureUnit.cmH2O,
+                )
+            return
+
+        if isinstance(action, SEMechanicalVentilatorVolumeControl):
+            if action.get_connection() == eSwitch.On:
+                self._runtime.airway_support_mode = "volume_control_ventilation"
+                self._runtime.fio2 = self._get_scalar_value(
+                    action,
+                    "has_fraction_inspired_oxygen",
+                    "get_fraction_inspired_oxygen",
+                )
+                self._runtime.peep_cmh2o = self._get_scalar_value(
+                    action,
+                    "has_positive_end_expired_pressure",
+                    "get_positive_end_expired_pressure",
+                    unit=PressureUnit.cmH2O,
+                )
+                self._runtime.ventilator_respiration_rate_bpm = self._get_scalar_value(
+                    action,
+                    "has_respiration_rate",
+                    "get_respiration_rate",
+                    unit=FrequencyUnit.Per_min,
+                )
+                self._runtime.ventilator_tidal_volume_ml = self._get_scalar_value(
+                    action,
+                    "has_tidal_volume",
+                    "get_tidal_volume",
+                    unit=VolumeUnit.mL,
                 )
             return
 
