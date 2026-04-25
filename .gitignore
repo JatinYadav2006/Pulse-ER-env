@@ -1,31 +1,18 @@
-<<<<<<< HEAD
-# Ignore compiled build artifacts
-engine-build/install/bin/
-engine-build/CMakeFiles/
-engine-build/*.cmake
-engine-build/Makefile
-engine-build/**/*.dll
-engine-build/**/*.exe
-engine-build/**/*.lib
-engine-build/**/*.pdb
-engine-build/**/*.obj
-engine-build/**/*.so
-engine-build/**/*.a
-
-# But NOT the python API - let that through
-!engine-build/install/python/
-=======
-# Ignore engine and build folders
+# Ignore Pulse Engine source + build outputs
 engine/
 engine-build/
 
+# Ignore Python virtual environment
+.venv/
+.venv312/
+venv/
+.vscode/
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
 
-# VS / IDE
+# VS Code / Visual Studio
 .vs/
 *.user
 *.suo
->>>>>>> 9122521c54082b4d10962a6f490e4bd6c1f9041e
