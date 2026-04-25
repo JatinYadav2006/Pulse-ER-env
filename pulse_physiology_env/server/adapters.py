@@ -57,7 +57,7 @@ class MockPulseAdapter(PatientBackend):
         return self._build_response(
             reward=0.0,
             tool_result=ToolResult(
-                tool_name="reset",
+                tool_name="load_scenario",
                 success=True,
                 message=f"Scenario '{scenario.scenario_id}' loaded.",
                 state_changed=True,

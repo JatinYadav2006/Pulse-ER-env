@@ -60,6 +60,7 @@ Still in progress:
 - formal swap from the mock adapter boundary to the real runtime boundary for training-facing loops
 - final alignment review between the frozen contract and the richer real runtime state
 - integration verification that mock-side consumer code continues to work cleanly against the real path
+- submission-facing TRL/Unsloth training artifacts, reward plots, and Hugging Face Space packaging
 
 ## Tier Framing
 
@@ -188,6 +189,29 @@ This requires the OpenEnv dependency stack to be installed.
 ```bash
 uvicorn server.app:app --reload
 ```
+
+### 4. Submission-Facing GRPO Training
+
+The hackathon judges explicitly want an OpenEnv-native training story built with
+TRL or Unsloth, not only a local custom trainer. The submission-facing training
+entrypoint is [train_grpo.py](./train_grpo.py), which uses:
+
+- the public [client.py](./client.py) client
+- the TRL/OpenEnv-style [trl_env.py](./trl_env.py) environment factory
+- GRPO over the running OpenEnv server
+
+Example local launch:
+
+```bash
+python -m pulse_physiology_env.train_grpo \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --env-url http://127.0.0.1:8000 \
+  --scenario polytrauma_demo
+```
+
+The internal [train_online.py](./train_online.py) script is still useful for
+fast smoke testing and feature debugging, but it is not the primary
+submission-facing training path.
 
 ## Backend Integration Contract For Person 1
 

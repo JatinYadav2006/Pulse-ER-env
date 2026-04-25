@@ -75,7 +75,7 @@ app = create_app(
     ToolAction,
     PulsePhysiologyObservation,
     env_name="pulse_physiology_env",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    max_concurrent_envs=32,
 )
 _PATHOLOGY_ARCHITECT = PathologyArchitect()
 

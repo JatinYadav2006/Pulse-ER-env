@@ -16,6 +16,11 @@ try:
 except ImportError:  # pragma: no cover - allows consumer-side imports without runtime deps
     RealPulseBackend = None
 
+try:
+    from .gym_env import PulseGymEnv
+except ImportError:  # pragma: no cover - allows imports without optional gymnasium
+    PulseGymEnv = None
+
 from .models import (
     EnvironmentResponse,
     ObservationMetadata,
@@ -51,6 +56,7 @@ __all__ = [
     "ScenarioDifficulty",
     "PulsePhysiologyAction",
     "PulsePhysiologyObservation",
+    "PulseGymEnv",
     "RealPulseBackend",
     "ToolAction",
     "ToolError",

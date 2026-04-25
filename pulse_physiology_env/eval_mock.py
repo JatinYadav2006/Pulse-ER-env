@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from pulse_physiology_env.demo_llm_policy import heuristic_infer_fn
 from pulse_physiology_env.episode_runner import EpisodeRunner, EpisodeTerminationReason
+from pulse_physiology_env.gym_env import PulseGymEnv
 from pulse_physiology_env.models import EnvironmentResponse, ObservationMetadata, PulsePhysiologyObservation, ToolError, ToolResult
 from pulse_physiology_env.policies import (
     LLMPolicy,
@@ -372,6 +373,43 @@ def _regression_check_real_expert_heuristics() -> None:
         raise SystemExit("Expert regression: real trauma policy should target the highest-flow hemorrhage site.")
 
 
+def _regression_check_gym_wrapper() -> None:
+    """Validate the training-facing Gym wrapper against the mock backend."""
+
+    env = PulseGymEnv(
+        backend_name="mock",
+        scenario_id="respiratory_distress",
+        max_episode_steps=4,
+        seed=0,
+    )
+    try:
+        observation, info = env.reset(seed=0)
+        if len(observation) != env.observation_space.shape[0]:
+            raise SystemExit("Gym wrapper regression failed: reset feature length does not match observation_space.")
+        if len(info["action_mask"]) != env.action_space.n:
+            raise SystemExit("Gym wrapper regression failed: action mask length does not match action space.")
+
+        get_vitals_index = env.tool_names.index("get_vitals")
+        _, reward, terminated, truncated, step_info = env.step(get_vitals_index)
+        if not isinstance(reward, float):
+            raise SystemExit("Gym wrapper regression failed: reward should be a float.")
+        if terminated or truncated:
+            raise SystemExit("Gym wrapper regression failed: get_vitals should not end the episode.")
+        if step_info["tool_name"] != "get_vitals":
+            raise SystemExit("Gym wrapper regression failed: expected get_vitals in step info.")
+
+        invalid_index = env.tool_names.index("give_pressor")
+        _, invalid_reward, invalid_terminated, invalid_truncated, invalid_info = env.step(invalid_index)
+        if not invalid_info["invalid_action"]:
+            raise SystemExit("Gym wrapper regression failed: unavailable action should be marked invalid.")
+        if invalid_reward >= 0.0:
+            raise SystemExit("Gym wrapper regression failed: invalid action should incur a penalty.")
+        if invalid_terminated or invalid_truncated:
+            raise SystemExit("Gym wrapper regression failed: invalid masked action should not immediately end the episode.")
+    finally:
+        env.close()
+
+
 def score_policy(policy_factory, policy_name: str) -> PolicyScore:
     """Evaluate one policy factory across all mock scenarios."""
 
@@ -426,6 +464,8 @@ def main() -> None:
     print("PASS tool parser hierarchy\n")
     _regression_check_real_expert_heuristics()
     print("PASS real expert heuristics\n")
+    _regression_check_gym_wrapper()
+    print("PASS gym wrapper reset/step surfaces\n")
 
     expert = score_policy(lambda scenario_id: build_expert_policy(), "expert")
     llm_demo = score_policy(
