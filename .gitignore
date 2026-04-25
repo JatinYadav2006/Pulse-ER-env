@@ -1,13 +1,22 @@
+<<<<<<< HEAD
 # Ignore engine and build folders
+=======
+# Ignore Pulse Engine source + build outputs
+>>>>>>> 30e5d2f929a2c0efe7e6ca7c6c5be4da0e6ba97d
 engine/
 engine-build/
 
+# Ignore Python virtual environment
+.venv/
+.venv312/
+venv/
+.vscode/
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
 
-# VS / IDE
+# VS Code / Visual Studio
 .vs/
 *.user
 *.suo
