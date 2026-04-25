@@ -165,6 +165,7 @@ def main() -> None:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument("--use-cpu", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -173,6 +174,18 @@ def main() -> None:
         raise RuntimeError(
             "train_grpo.py requires TRL. Install the Hugging Face TRL/OpenEnv training stack first."
         ) from exc
+
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover - depends on training environment
+        raise RuntimeError(
+            "train_grpo.py requires torch. Install the Hugging Face TRL/OpenEnv training stack first."
+        ) from exc
+
+    cuda_available = bool(torch.cuda.is_available())
+    use_cpu = bool(args.use_cpu or not cuda_available)
+    bf16_enabled = bool(cuda_available and not use_cpu and torch.cuda.is_bf16_supported())
+    fp16_enabled = bool(cuda_available and not use_cpu and not bf16_enabled)
 
     configure_trl_env(
         env_url=args.env_url,
@@ -197,6 +210,9 @@ def main() -> None:
             max_completion_length=args.max_steps,
             num_generations=args.num_generations,
             log_completions=True,
+            use_cpu=use_cpu,
+            bf16=bf16_enabled,
+            fp16=fp16_enabled,
             chat_template_kwargs={"enable_thinking": False},
         ),
         environment_factory=environment_factory,
