@@ -194,6 +194,25 @@ class RewardEngine:
             "set_ventilator_fio2",
         }
     )
+    RSI_PREOXYGENATION_TOOLS = frozenset(
+        {
+            "give_oxygen",
+            "apply_nasal_cannula",
+            "apply_simple_mask",
+            "apply_nonrebreather_mask",
+            "airway_support",
+            "apply_bag_valve_mask",
+        }
+    )
+    RSI_INDUCTION_TOOLS = frozenset(
+        {
+            "administer_ketamine_bolus",
+            "administer_midazolam_bolus",
+            "administer_lorazepam_bolus",
+        }
+    )
+    RSI_PARALYTIC_TOOLS = frozenset({"administer_succinylcholine_bolus"})
+    RSI_INTUBATION_TOOLS = frozenset({"perform_intubation"})
     CPR_TOOLS = frozenset({"perform_cpr"})
     RESTRICTED_TOOLS = frozenset({"initiate_hemorrhage", "induce_cardiac_arrest", "apply_pericardial_effusion"})
     BLOOD_PRODUCTS = frozenset({"blood", "packed_rbc", "packed_rbcs", "prbc", "prbcs"})
@@ -444,8 +463,8 @@ class RewardEngine:
         if tool_name == "administer_epinephrine_bolus" and "cardiac_arrest" in before.active_alerts:
             reward += 0.3
 
-        if tool_name == "administer_succinylcholine_bolus" and not before.intubated:
-            reward -= 1.0
+        if tool_name in self.RSI_PARALYTIC_TOOLS:
+            reward += self._reward_rsi_sequence(tracker, before)
 
         if tool_name in self.CPR_TOOLS:
             if "cardiac_arrest" in before.active_alerts:
@@ -499,6 +518,46 @@ class RewardEngine:
             reward -= 0.1
 
         return self._clip(reward, -0.3, 0.3)
+
+    def _reward_rsi_sequence(
+        self,
+        tracker: RewardTracker,
+        before: PatientState,
+    ) -> float:
+        preoxygenated = self._history_has_recent_tool(
+            tracker.action_history,
+            self.RSI_PREOXYGENATION_TOOLS,
+            window=3,
+        ) or before.airway_support in {
+            "bag_valve_mask",
+            "pressure_control_ventilation",
+            "volume_control_ventilation",
+            "cpap",
+        }
+        induction_started = self._history_has_recent_tool(
+            tracker.action_history,
+            self.RSI_INDUCTION_TOOLS,
+            window=2,
+        )
+        intubation_already_underway = self._history_has_recent_tool(
+            tracker.action_history,
+            self.RSI_INTUBATION_TOOLS,
+            window=1,
+        ) or before.intubated
+        urgent_airway = (
+            before.mental_status in {"pain", "unresponsive"}
+            or (before.spo2 is not None and before.spo2 < 0.9)
+        )
+
+        if before.intubated:
+            return -0.2
+        if not urgent_airway and not preoxygenated:
+            return -0.9
+        if preoxygenated and (induction_started or urgent_airway or intubation_already_underway):
+            return 0.1
+        if preoxygenated:
+            return -0.2
+        return -1.0
 
     def _reward_anti_exploitation(
         self,
@@ -597,6 +656,20 @@ class RewardEngine:
 
     def _history_has_tag(self, action_history: list[ActionRecord], tag: str) -> bool:
         return any(record.success and tag in record.tags for record in action_history)
+
+    @staticmethod
+    def _history_has_recent_tool(
+        action_history: list[ActionRecord],
+        tool_names: frozenset[str],
+        *,
+        window: int,
+    ) -> bool:
+        if window <= 0:
+            return False
+        return any(
+            record.success and record.tool_name in tool_names
+            for record in action_history[-window:]
+        )
 
     @classmethod
     def _normalize_fluid_type(cls, tool_name: str, arguments: dict[str, Any]) -> str:

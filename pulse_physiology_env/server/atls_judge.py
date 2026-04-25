@@ -68,6 +68,10 @@ class ATLSJudge:
     VOLUME_SUPPORT_TOOLS = frozenset({"give_fluids", "administer_crystalloid_bolus", "administer_blood_transfusion", "activate_massive_transfusion_protocol"})
     PRESSOR_TOOLS = frozenset({"give_pressor", "start_norepinephrine_infusion", "start_phenylephrine_infusion", "start_dopamine_infusion", "adjust_infusion_rate"})
     AIRWAY_TOOLS = frozenset({"give_oxygen", "apply_nasal_cannula", "apply_simple_mask", "apply_nonrebreather_mask", "airway_support", "apply_bag_valve_mask", "perform_intubation"})
+    RSI_PREOXYGENATION_TOOLS = frozenset({"give_oxygen", "apply_nasal_cannula", "apply_simple_mask", "apply_nonrebreather_mask", "airway_support", "apply_bag_valve_mask"})
+    RSI_INDUCTION_TOOLS = frozenset({"administer_ketamine_bolus", "administer_midazolam_bolus", "administer_lorazepam_bolus"})
+    RSI_PARALYTIC_TOOLS = frozenset({"administer_succinylcholine_bolus"})
+    RSI_INTUBATION_TOOLS = frozenset({"perform_intubation"})
     RESTRICTED_TOOLS = frozenset({"initiate_hemorrhage", "induce_cardiac_arrest", "apply_pericardial_effusion"})
     CPR_TOOLS = frozenset({"perform_cpr"})
 
@@ -178,10 +182,9 @@ class ATLSJudge:
         if cpr_idx != -1 and not self._cpr_had_documented_arrest(cpr_idx, state, state_history, action_history):
             return ATLSCheck("fail", "Simulation safety", "CPR was started without a documented arrest transition.", -16)
 
-        succ_idx = self._first_index(action_history, {"administer_succinylcholine_bolus"})
-        airway_idx = self._first_index(action_history, {"perform_intubation"})
-        if succ_idx != -1 and (airway_idx == -1 or airway_idx > succ_idx):
-            return ATLSCheck("fail", "Simulation safety", "Paralysis was attempted before the airway was secured.", -20)
+        rsi_check = self._judge_rsi_sequence(action_history)
+        if rsi_check is not None:
+            return rsi_check
 
         return ATLSCheck("pass", "Simulation safety", "No major protocol-level safety violation was detected in the action log.", 6)
 
@@ -208,6 +211,39 @@ class ATLSJudge:
             if record.success and self._record_is_pressor_start(record):
                 return idx
         return -1
+
+    def _judge_rsi_sequence(self, action_history: Sequence[ActionRecord]) -> ATLSCheck | None:
+        succ_idx = self._first_index(action_history, self.RSI_PARALYTIC_TOOLS)
+        if succ_idx == -1:
+            return None
+
+        preoxygenated = self._has_recent_tool_before(
+            action_history,
+            succ_idx,
+            self.RSI_PREOXYGENATION_TOOLS,
+            window=3,
+        )
+        induction_started = self._has_recent_tool_before(
+            action_history,
+            succ_idx,
+            self.RSI_INDUCTION_TOOLS,
+            window=2,
+        )
+        intub_after_idx = self._first_index_after(
+            action_history,
+            succ_idx,
+            self.RSI_INTUBATION_TOOLS,
+        )
+
+        if preoxygenated and intub_after_idx != -1 and intub_after_idx - succ_idx <= 2:
+            if induction_started:
+                return ATLSCheck("pass", "Simulation safety", "RSI sequence was documented with preparation, induction, and rapid airway follow-through.", 6)
+            return ATLSCheck("warn", "Simulation safety", "Paralysis was followed by rapid intubation, but an induction agent was not clearly documented.", -3)
+
+        if preoxygenated or induction_started:
+            return ATLSCheck("warn", "Simulation safety", "RSI sequence started with some airway preparation, but paralysis was not followed quickly by airway capture.", -10)
+
+        return ATLSCheck("fail", "Simulation safety", "Paralysis was attempted without clear preoxygenation or rapid intubation follow-through.", -20)
 
     @staticmethod
     def _record_is_pressor_start(record: ActionRecord) -> bool:
@@ -237,6 +273,32 @@ class ATLSJudge:
                 return True
 
         return "cardiac_arrest" in current_state.active_alerts
+
+    @staticmethod
+    def _has_recent_tool_before(
+        action_history: Sequence[ActionRecord],
+        index: int,
+        tool_names: frozenset[str],
+        *,
+        window: int,
+    ) -> bool:
+        start = max(0, index - window)
+        return any(
+            record.success and record.tool_name in tool_names
+            for record in action_history[start:index]
+        )
+
+    @staticmethod
+    def _first_index_after(
+        action_history: Sequence[ActionRecord],
+        index: int,
+        tool_names: frozenset[str],
+    ) -> int:
+        for idx in range(index + 1, len(action_history)):
+            record = action_history[idx]
+            if record.success and record.tool_name in tool_names:
+                return idx
+        return -1
 
     @staticmethod
     def _build_verdict(score: int) -> str:

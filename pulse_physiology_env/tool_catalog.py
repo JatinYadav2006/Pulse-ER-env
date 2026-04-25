@@ -453,22 +453,22 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         tool_name="get_blood_gas",
         tier="tier_1",
         description="Order or review arterial blood gas results.",
-        read_only=True,
-        state_changing=False,
+        read_only=False,
+        state_changing=True,
     ),
     ToolSpec(
         tool_name="get_cbc",
         tier="tier_1",
         description="Order or review complete blood count results.",
-        read_only=True,
-        state_changing=False,
+        read_only=False,
+        state_changing=True,
     ),
     ToolSpec(
         tool_name="get_bmp",
         tier="tier_1",
         description="Order or review basic metabolic panel results.",
-        read_only=True,
-        state_changing=False,
+        read_only=False,
+        state_changing=True,
     ),
 )
 
