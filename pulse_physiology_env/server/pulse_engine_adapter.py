@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,7 @@ from pulse_physiology_env.patient_state import (
     ArterialBloodGasResult,
     BasicMetabolicPanelResult,
     CompleteBloodCountResult,
+    MentalStatus,
     PatientState,
 )
 
@@ -54,17 +56,23 @@ def _bootstrap_pulse_paths(explicit_install_dir: Path | None = None) -> Path:
 
 _PULSE_IMPORT_ERROR: Exception | None = None
 _BOOTSTRAP_INSTALL_DIR: Path | None = None
+
 try:
     _BOOTSTRAP_INSTALL_DIR = _bootstrap_pulse_paths()
 
     from pulse.engine.PulseEngine import PulseEngine
-    from pulse.cdm.engine import SEAction, SEDataRequest, SEDataRequestManager, eSide, eSwitch
+    from pulse.cdm.engine import SEAction, SEDataRequest, SEDataRequestManager, eGate, eSide, eSwitch
     from pulse.cdm.patient_actions import (
         SEHemorrhage,
         SEIntubation,
         SENeedleDecompression,
+        SESubstanceCompoundInfusion,
         SESubstanceInfusion,
+        SESupplementalOxygen,
         SETensionPneumothorax,
+        eDevice,
+        eHemorrhage_Compartment,
+        eHemorrhage_Type,
         eIntubationType,
     )
     from pulse.cdm.scalars import (
@@ -83,9 +91,16 @@ except Exception as exc:  # pragma: no cover - exercised only on misconfigured h
     _PULSE_IMPORT_ERROR = exc
 
 
+def _snake_case(value: str) -> str:
+    compact = value.split(".")[-1].strip()
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", compact).replace("__", "_").lower()
+
+
 @dataclass
 class _RuntimeContext:
     state_file: Path | None = None
+    scenario_id: str = "baseline"
+    patient_id: str = "standard_male"
     action_budget_remaining: int | None = None
     pending_diagnostics: dict[str, int] = field(default_factory=dict)
     active_infusions: dict[str, float] = field(default_factory=dict)
@@ -93,15 +108,88 @@ class _RuntimeContext:
     active_tension_pneumothorax_sides: set[str] = field(default_factory=set)
     pain_sources: dict[str, float] = field(default_factory=dict)
     intubation_type: str = "Off"
+    patient_position: str = "supine"
+    oxygen_device: str | None = None
+    oxygen_flow_lpm: float | None = None
+    baseline_blood_volume_ml: float | None = None
 
 
 class PulseEngineAdapter:
     """Loads Pulse states, advances simulation time, and synthesizes PatientState."""
 
     DEFAULT_STATE_FILENAME = "StandardMale@0s.json"
+    DEFAULT_OXYGEN_SUPPLY_L = 1000.0
+    DEFAULT_PATIENT_POSITION = "supine"
+
     _SODIUM_MOLAR_MASS = 22.98976928
     _POTASSIUM_MOLAR_MASS = 39.0983
     _CALCIUM_MOLAR_MASS = 40.078
+
+    _OXYGEN_DEVICE_MAP = {
+        "nasal_cannula": eDevice.NasalCannula,
+        "simple_mask": eDevice.SimpleMask,
+        "non_rebreather_mask": eDevice.NonRebreatherMask,
+    }
+    _DEFAULT_OXYGEN_FLOW_LPM = {
+        "nasal_cannula": 4.0,
+        "simple_mask": 8.0,
+        "non_rebreather_mask": 15.0,
+    }
+    _SIDE_MAP = {
+        "left": eSide.Left,
+        "right": eSide.Right,
+    }
+    _HEMORRHAGE_TYPE_MAP = {
+        "external": eHemorrhage_Type.External,
+        "internal": eHemorrhage_Type.Internal,
+    }
+    _INTUBATION_TYPE_MAP = {
+        "off": eIntubationType.Off,
+        "oropharyngeal": eIntubationType.Oropharyngeal,
+        "oropharyngeal_airway": eIntubationType.Oropharyngeal,
+        "nasopharyngeal": eIntubationType.Nasopharyngeal,
+        "nasopharyngeal_airway": eIntubationType.Nasopharyngeal,
+        "tracheal": eIntubationType.Tracheal,
+        "endotracheal": eIntubationType.Tracheal,
+        "endotracheal_tube": eIntubationType.Tracheal,
+        "esophageal": eIntubationType.Esophageal,
+        "left_mainstem": eIntubationType.LeftMainstem,
+        "right_mainstem": eIntubationType.RightMainstem,
+    }
+    _AIRWAY_SUPPORT_NAMES = {
+        eIntubationType.Off.name: None,
+        eIntubationType.Oropharyngeal.name: "oropharyngeal_airway",
+        eIntubationType.Nasopharyngeal.name: "nasopharyngeal_airway",
+        eIntubationType.Tracheal.name: "endotracheal_tube",
+        eIntubationType.Esophageal.name: "esophageal_intubation",
+        eIntubationType.LeftMainstem.name: "left_mainstem_intubation",
+        eIntubationType.RightMainstem.name: "right_mainstem_intubation",
+    }
+    _VALID_POSITIONS = {
+        "supine",
+        "upright",
+        "trendelenburg",
+        "recovery",
+        "semi_fowler",
+    }
+    _HEMORRHAGE_COMPARTMENT_MAP = {
+        "aorta": eHemorrhage_Compartment.Aorta,
+        "brain": eHemorrhage_Compartment.Brain,
+        "muscle": eHemorrhage_Compartment.Muscle,
+        "large_intestine": eHemorrhage_Compartment.LargeIntestine,
+        "left_arm": eHemorrhage_Compartment.LeftArm,
+        "left_kidney": eHemorrhage_Compartment.LeftKidney,
+        "left_leg": eHemorrhage_Compartment.LeftLeg,
+        "liver": eHemorrhage_Compartment.Liver,
+        "right_arm": eHemorrhage_Compartment.RightArm,
+        "right_kidney": eHemorrhage_Compartment.RightKidney,
+        "right_leg": eHemorrhage_Compartment.RightLeg,
+        "skin": eHemorrhage_Compartment.Skin,
+        "small_intestine": eHemorrhage_Compartment.SmallIntestine,
+        "splanchnic": eHemorrhage_Compartment.Splanchnic,
+        "spleen": eHemorrhage_Compartment.Spleen,
+        "vena_cava": eHemorrhage_Compartment.VenaCava,
+    }
 
     def __init__(
         self,
@@ -138,6 +226,8 @@ class PulseEngineAdapter:
         self,
         state_file: str | Path | None = None,
         *,
+        scenario_id: str = "baseline",
+        patient_id: str | None = None,
         initial_actions: Sequence[SEAction] | None = None,
         action_budget_remaining: int | None = None,
     ) -> PatientState:
@@ -154,21 +244,195 @@ class PulseEngineAdapter:
         if not self._engine.serialize_from_file(str(resolved_state_file), self._data_request_mgr):
             raise RuntimeError(f"Pulse failed to load state file: {resolved_state_file}")
 
+        resolved_patient_id = patient_id or self._default_patient_id_from_state_file(resolved_state_file)
         self._runtime = _RuntimeContext(
             state_file=resolved_state_file,
+            scenario_id=scenario_id,
+            patient_id=resolved_patient_id,
             action_budget_remaining=(
                 self._default_action_budget_remaining
                 if action_budget_remaining is None
                 else action_budget_remaining
             ),
+            patient_position=self.DEFAULT_PATIENT_POSITION,
         )
         self._refresh_raw_metrics()
+        self._runtime.baseline_blood_volume_ml = self._latest_raw_metrics.get("blood_volume_ml")
         self._last_lactate_mg_per_dl = self._latest_raw_metrics.get("lactate_mg_per_dl")
 
         if initial_actions:
             return self.apply_actions(initial_actions)
 
         return self.get_full_state()
+
+    def set_scenario_context(self, *, scenario_id: str, patient_id: str | None = None) -> PatientState:
+        """Update scenario metadata without reloading the engine."""
+
+        self._runtime.scenario_id = scenario_id
+        if patient_id is not None:
+            self._runtime.patient_id = patient_id
+        return self.get_full_state()
+
+    def set_patient_position(self, position: str) -> PatientState:
+        """Update the tracked patient position for downstream decision support."""
+
+        canonical = position.strip().lower().replace("-", "_").replace(" ", "_")
+        if canonical not in self._VALID_POSITIONS:
+            valid = ", ".join(sorted(self._VALID_POSITIONS))
+            raise ValueError(f"Unsupported patient position '{position}'. Expected one of: {valid}")
+
+        self._runtime.patient_position = canonical
+        return self.get_full_state()
+
+    def apply_supplemental_oxygen(
+        self,
+        *,
+        device: str,
+        flow_lpm: float | None = None,
+        supply_volume_l: float = DEFAULT_OXYGEN_SUPPLY_L,
+        advance_time_seconds: float | None = 60.0,
+    ) -> PatientState:
+        """Apply supplemental oxygen using a Pulse native oxygen action."""
+
+        device_key = device.strip().lower().replace("-", "_").replace(" ", "_")
+        if device_key not in self._OXYGEN_DEVICE_MAP:
+            valid = ", ".join(sorted(self._OXYGEN_DEVICE_MAP))
+            raise ValueError(f"Unsupported oxygen device '{device}'. Expected one of: {valid}")
+
+        resolved_flow_lpm = flow_lpm or self._DEFAULT_OXYGEN_FLOW_LPM[device_key]
+        if resolved_flow_lpm <= 0:
+            raise ValueError("flow_lpm must be greater than zero.")
+        if supply_volume_l <= 0:
+            raise ValueError("supply_volume_l must be greater than zero.")
+
+        action = SESupplementalOxygen()
+        action.set_device(self._OXYGEN_DEVICE_MAP[device_key])
+        action.get_flow().set_value(resolved_flow_lpm, VolumePerTimeUnit.L_Per_min)
+        action.get_volume().set_value(supply_volume_l, VolumeUnit.L)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def infuse_compound(
+        self,
+        *,
+        compound: str,
+        bag_volume_ml: float,
+        rate_ml_per_min: float,
+        advance_time_seconds: float | None = None,
+    ) -> PatientState:
+        """Administer a Pulse compound infusion such as saline or blood."""
+
+        if not compound or not compound.strip():
+            raise ValueError("compound must be a non-empty string.")
+        if bag_volume_ml <= 0:
+            raise ValueError("bag_volume_ml must be greater than zero.")
+        if rate_ml_per_min <= 0:
+            raise ValueError("rate_ml_per_min must be greater than zero.")
+
+        action = SESubstanceCompoundInfusion()
+        action.set_compound(compound.strip())
+        action.get_bag_volume().set_value(bag_volume_ml, VolumeUnit.mL)
+        action.get_rate().set_value(rate_ml_per_min, VolumePerTimeUnit.mL_Per_min)
+
+        delivery_duration_s = (bag_volume_ml / rate_ml_per_min) * 60.0
+        monitor_window_s = delivery_duration_s if advance_time_seconds is None else advance_time_seconds
+        state = self.apply_actions([action], advance_time_seconds=monitor_window_s)
+
+        if monitor_window_s >= delivery_duration_s:
+            self._runtime.active_infusions.pop(_snake_case(compound), None)
+            state = self.get_full_state()
+        return state
+
+    def set_hemorrhage(
+        self,
+        compartment: str,
+        *,
+        flow_rate_ml_per_min: float | None = None,
+        severity: float | None = None,
+        hemorrhage_type: str = "external",
+        advance_time_seconds: float | None = None,
+    ) -> PatientState:
+        """Start, modify, or stop a hemorrhage in a specific compartment."""
+
+        compartment_key = compartment.strip().lower().replace("-", "_").replace(" ", "_")
+        if compartment_key not in self._HEMORRHAGE_COMPARTMENT_MAP:
+            valid = ", ".join(sorted(self._HEMORRHAGE_COMPARTMENT_MAP))
+            raise ValueError(f"Unsupported hemorrhage compartment '{compartment}'. Expected one of: {valid}")
+
+        hemorrhage_type_key = hemorrhage_type.strip().lower()
+        if hemorrhage_type_key not in self._HEMORRHAGE_TYPE_MAP:
+            valid = ", ".join(sorted(self._HEMORRHAGE_TYPE_MAP))
+            raise ValueError(f"Unsupported hemorrhage type '{hemorrhage_type}'. Expected one of: {valid}")
+
+        if flow_rate_ml_per_min is None and severity is None:
+            flow_rate_ml_per_min = 0.0
+        if flow_rate_ml_per_min is not None and flow_rate_ml_per_min < 0:
+            raise ValueError("flow_rate_ml_per_min cannot be negative.")
+        if severity is not None and not 0.0 <= severity <= 1.0:
+            raise ValueError("severity must be between 0.0 and 1.0.")
+
+        action = SEHemorrhage()
+        action.set_type(self._HEMORRHAGE_TYPE_MAP[hemorrhage_type_key])
+        action.set_compartment(self._HEMORRHAGE_COMPARTMENT_MAP[compartment_key])
+        if flow_rate_ml_per_min is not None:
+            action.get_flow_rate().set_value(flow_rate_ml_per_min, VolumePerTimeUnit.mL_Per_min)
+        if severity is not None:
+            action.get_severity().set_value(severity)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def set_tension_pneumothorax(
+        self,
+        side: str,
+        *,
+        severity: float,
+        advance_time_seconds: float | None = None,
+    ) -> PatientState:
+        """Create a tension pneumothorax using Pulse's native action."""
+
+        side_key = side.strip().lower()
+        if side_key not in self._SIDE_MAP:
+            raise ValueError("side must be 'left' or 'right'.")
+        if not 0.0 <= severity <= 1.0:
+            raise ValueError("severity must be between 0.0 and 1.0.")
+
+        action = SETensionPneumothorax()
+        action.set_side(self._SIDE_MAP[side_key])
+        action.set_type(eGate.Open)
+        action.get_severity().set_value(severity)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def apply_needle_decompression(
+        self,
+        side: str,
+        *,
+        advance_time_seconds: float | None = 90.0,
+    ) -> PatientState:
+        """Perform needle decompression on the specified hemithorax."""
+
+        side_key = side.strip().lower()
+        if side_key not in self._SIDE_MAP:
+            raise ValueError("side must be 'left' or 'right'.")
+
+        action = SENeedleDecompression()
+        action.set_side(self._SIDE_MAP[side_key])
+        action.set_state(eSwitch.On)
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
+
+    def set_intubation(
+        self,
+        kind: str,
+        *,
+        advance_time_seconds: float | None = 60.0,
+    ) -> PatientState:
+        """Apply or remove airway support using Pulse's intubation action."""
+
+        kind_key = kind.strip().lower().replace("-", "_").replace(" ", "_")
+        if kind_key not in self._INTUBATION_TYPE_MAP:
+            valid = ", ".join(sorted(self._INTUBATION_TYPE_MAP))
+            raise ValueError(f"Unsupported airway support '{kind}'. Expected one of: {valid}")
+
+        action = SEIntubation()
+        action.set_type(self._INTUBATION_TYPE_MAP[kind_key])
+        return self.apply_actions([action], advance_time_seconds=advance_time_seconds)
 
     def apply_actions(
         self,
@@ -198,6 +462,8 @@ class PulseEngineAdapter:
 
         if seconds < 0:
             raise ValueError("Simulation time cannot be advanced by a negative duration.")
+        if seconds == 0:
+            return self.get_full_state()
 
         engine = self._require_engine()
         if not engine.advance_time_s(seconds):
@@ -223,7 +489,7 @@ class PulseEngineAdapter:
             else None
         )
 
-        arterial_pco2 = metrics.get("arterial_carbon_dioxide_pressure_mm_hg")
+        arterial_pco2 = metrics.get("arterial_carbon_dioxide_pressure_mmhg")
         blood_ph = metrics.get("blood_ph")
         bicarbonate = self._derive_bicarbonate_meq_per_l(blood_ph, arterial_pco2)
         base_excess = metrics.get("base_excess_meq_per_l")
@@ -231,8 +497,8 @@ class PulseEngineAdapter:
 
         abg_result = ArterialBloodGasResult(
             ph=blood_ph,
-            partial_pressure_of_oxygen_mm_hg=metrics.get("arterial_oxygen_pressure_mm_hg"),
-            partial_pressure_of_carbon_dioxide_mm_hg=arterial_pco2,
+            partial_pressure_of_oxygen_mmhg=metrics.get("arterial_oxygen_pressure_mmhg"),
+            partial_pressure_of_carbon_dioxide_mmhg=arterial_pco2,
             oxygen_saturation=metrics.get("oxygen_saturation"),
             bicarbonate_meq_per_l=bicarbonate,
             lactate_mg_per_dl=metrics.get("lactate_mg_per_dl"),
@@ -264,38 +530,43 @@ class PulseEngineAdapter:
         )
 
         is_alive = self._is_alive_from_metrics(metrics)
-        sedation_level = metrics.get("sedation_level") or 0.0
-        consciousness_level = 0.0 if not is_alive else self._clamp01(1.0 - sedation_level)
-        pain_level = self._derive_pain_level()
-
+        mental_status = self._derive_mental_status(metrics, is_alive)
+        shock_index = self._derive_shock_index(
+            metrics.get("heart_rate_bpm"),
+            metrics.get("systolic_bp_mmhg"),
+        )
         state = PatientState(
+            scenario_id=self._runtime.scenario_id,
+            patient_id=self._runtime.patient_id,
+            sim_time_s=metrics.get("simulated_time_seconds") or 0.0,
             heart_rate_bpm=metrics.get("heart_rate_bpm"),
-            systolic_bp_mm_hg=metrics.get("systolic_bp_mm_hg"),
-            diastolic_bp_mm_hg=metrics.get("diastolic_bp_mm_hg"),
-            mean_arterial_pressure_mm_hg=metrics.get("mean_arterial_pressure_mm_hg"),
+            systolic_bp_mmhg=metrics.get("systolic_bp_mmhg"),
+            diastolic_bp_mmhg=metrics.get("diastolic_bp_mmhg"),
+            mean_arterial_pressure_mmhg=metrics.get("mean_arterial_pressure_mmhg"),
             cardiac_output_l_per_min=metrics.get("cardiac_output_l_per_min"),
             spo2=metrics.get("oxygen_saturation"),
-            respiratory_rate_bpm=metrics.get("respiration_rate_bpm"),
-            etco2_mm_hg=metrics.get("end_tidal_carbon_dioxide_pressure_mm_hg"),
+            respiration_rate_bpm=metrics.get("respiration_rate_bpm"),
+            blood_volume_ml=blood_volume_ml,
+            mental_status=mental_status,
+            active_alerts=self._derive_alerts(metrics, is_alive, shock_index),
+            done=not is_alive,
+            etco2_mmhg=metrics.get("end_tidal_carbon_dioxide_pressure_mmhg"),
             tidal_volume_ml=metrics.get("tidal_volume_ml"),
             breath_sounds=self._derive_breath_sounds(),
-            consciousness_level=consciousness_level,
-            pain_level=pain_level,
             core_temperature_c=metrics.get("core_temperature_c"),
+            shock_index=shock_index,
+            lactate_trend=self._derive_lactate_trend(metrics.get("lactate_mg_per_dl")),
+            position=self._runtime.patient_position,
+            oxygen_device=self._runtime.oxygen_device,
+            oxygen_flow_lpm=self._runtime.oxygen_flow_lpm,
+            airway_support=self._AIRWAY_SUPPORT_NAMES.get(self._runtime.intubation_type),
+            intubated=self._is_intubated(),
             abg_result=abg_result,
             cbc_result=cbc_result,
             bmp_result=bmp_result,
             pending_diagnostics=dict(self._runtime.pending_diagnostics),
             active_infusions=dict(self._runtime.active_infusions),
             active_hemorrhages=dict(self._runtime.active_hemorrhages),
-            shock_index=self._derive_shock_index(
-                metrics.get("heart_rate_bpm"),
-                metrics.get("systolic_bp_mm_hg"),
-            ),
-            lactate_trend=self._derive_lactate_trend(metrics.get("lactate_mg_per_dl")),
-            intubated=self._is_intubated(),
-            simulated_time_seconds=metrics.get("simulated_time_seconds") or 0.0,
-            action_budget_remaining=self._runtime.action_budget_remaining,
         )
 
         self._last_lactate_mg_per_dl = metrics.get("lactate_mg_per_dl")
@@ -356,22 +627,37 @@ class PulseEngineAdapter:
     def _build_data_requests(self) -> tuple[list[str], list[Any]]:
         request_specs = [
             ("heart_rate_bpm", SEDataRequest.create_physiology_request("HeartRate", unit=FrequencyUnit.Per_min)),
-            ("systolic_bp_mm_hg", SEDataRequest.create_physiology_request("SystolicArterialPressure", unit=PressureUnit.mmHg)),
-            ("diastolic_bp_mm_hg", SEDataRequest.create_physiology_request("DiastolicArterialPressure", unit=PressureUnit.mmHg)),
-            ("mean_arterial_pressure_mm_hg", SEDataRequest.create_physiology_request("MeanArterialPressure", unit=PressureUnit.mmHg)),
-            ("cardiac_output_l_per_min", SEDataRequest.create_physiology_request("CardiacOutput", unit=VolumePerTimeUnit.L_Per_min)),
+            (
+                "systolic_bp_mmhg",
+                SEDataRequest.create_physiology_request("SystolicArterialPressure", unit=PressureUnit.mmHg),
+            ),
+            (
+                "diastolic_bp_mmhg",
+                SEDataRequest.create_physiology_request("DiastolicArterialPressure", unit=PressureUnit.mmHg),
+            ),
+            (
+                "mean_arterial_pressure_mmhg",
+                SEDataRequest.create_physiology_request("MeanArterialPressure", unit=PressureUnit.mmHg),
+            ),
+            (
+                "cardiac_output_l_per_min",
+                SEDataRequest.create_physiology_request("CardiacOutput", unit=VolumePerTimeUnit.L_Per_min),
+            ),
             ("stroke_volume_ml", SEDataRequest.create_physiology_request("HeartStrokeVolume", unit=VolumeUnit.mL)),
             (
-                "systemic_vascular_resistance_mm_hg_min_per_l",
+                "systemic_vascular_resistance_mmhg_min_per_l",
                 SEDataRequest.create_physiology_request(
                     "SystemicVascularResistance",
                     unit=PressureTimePerVolumeUnit.mmHg_min_Per_L,
                 ),
             ),
             ("oxygen_saturation", SEDataRequest.create_physiology_request("OxygenSaturation")),
-            ("respiration_rate_bpm", SEDataRequest.create_physiology_request("RespirationRate", unit=FrequencyUnit.Per_min)),
             (
-                "end_tidal_carbon_dioxide_pressure_mm_hg",
+                "respiration_rate_bpm",
+                SEDataRequest.create_physiology_request("RespirationRate", unit=FrequencyUnit.Per_min),
+            ),
+            (
+                "end_tidal_carbon_dioxide_pressure_mmhg",
                 SEDataRequest.create_physiology_request("EndTidalCarbonDioxidePressure", unit=PressureUnit.mmHg),
             ),
             ("tidal_volume_ml", SEDataRequest.create_physiology_request("TidalVolume", unit=VolumeUnit.mL)),
@@ -407,7 +693,10 @@ class PulseEngineAdapter:
             ("neuromuscular_block_level", SEDataRequest.create_physiology_request("NeuromuscularBlockLevel")),
             ("fatigue_level", SEDataRequest.create_physiology_request("FatigueLevel")),
             ("blood_ph", SEDataRequest.create_physiology_request("BloodPH")),
-            ("base_excess_meq_per_l", SEDataRequest.create_physiology_request("BaseExcess", unit=AmountPerVolumeUnit.mEq_Per_L)),
+            (
+                "base_excess_meq_per_l",
+                SEDataRequest.create_physiology_request("BaseExcess", unit=AmountPerVolumeUnit.mEq_Per_L),
+            ),
             ("hematocrit_fraction", SEDataRequest.create_physiology_request("Hematocrit")),
             ("hemoglobin_content_g", SEDataRequest.create_physiology_request("HemoglobinContent", unit=MassUnit.g)),
             (
@@ -419,11 +708,11 @@ class PulseEngineAdapter:
                 SEDataRequest.create_physiology_request("RedBloodCellCount", unit=AmountPerVolumeUnit.ct_Per_uL),
             ),
             (
-                "arterial_oxygen_pressure_mm_hg",
+                "arterial_oxygen_pressure_mmhg",
                 SEDataRequest.create_physiology_request("ArterialOxygenPressure", unit=PressureUnit.mmHg),
             ),
             (
-                "arterial_carbon_dioxide_pressure_mm_hg",
+                "arterial_carbon_dioxide_pressure_mmhg",
                 SEDataRequest.create_physiology_request("ArterialCarbonDioxidePressure", unit=PressureUnit.mmHg),
             ),
             ("blood_volume_ml", SEDataRequest.create_physiology_request("BloodVolume", unit=VolumeUnit.mL)),
@@ -511,21 +800,28 @@ class PulseEngineAdapter:
             self._runtime.intubation_type = action.get_type().name
             return
 
+        if isinstance(action, SESupplementalOxygen):
+            device_name = action.get_device().name if hasattr(action.get_device(), "name") else str(action.get_device())
+            self._runtime.oxygen_device = _snake_case(device_name) if device_name and "Null" not in device_name else None
+            flow_lpm = self._get_scalar_value(action, "has_flow", "get_flow", unit=VolumePerTimeUnit.L_Per_min)
+            self._runtime.oxygen_flow_lpm = flow_lpm
+            return
+
         if isinstance(action, SENeedleDecompression) and action.has_side():
-            side = action.get_side().name.lower()
+            side = _snake_case(action.get_side().name)
             self._runtime.active_tension_pneumothorax_sides.discard(side)
             self._runtime.pain_sources.pop(f"tension_pneumothorax:{side}", None)
             return
 
         if isinstance(action, SETensionPneumothorax) and action.has_side():
-            side = action.get_side().name.lower()
+            side = _snake_case(action.get_side().name)
             severity = self._get_scalar_value(action, "has_severity", "get_severity")
             self._runtime.active_tension_pneumothorax_sides.add(side)
             self._runtime.pain_sources[f"tension_pneumothorax:{side}"] = severity or 0.8
             return
 
         if isinstance(action, SEHemorrhage) and action.has_compartment():
-            compartment = str(action.get_compartment())
+            compartment = self._normalize_compartment_name(action.get_compartment())
             rate_ml_per_min = self._get_scalar_value(
                 action,
                 "has_flow_rate",
@@ -543,8 +839,24 @@ class PulseEngineAdapter:
             self._runtime.pain_sources[f"hemorrhage:{compartment}"] = estimated_pain
             return
 
+        if isinstance(action, SESubstanceCompoundInfusion):
+            compound = action.get_compound()
+            if compound:
+                rate_ml_per_min = self._get_scalar_value(
+                    action,
+                    "has_rate",
+                    "get_rate",
+                    unit=VolumePerTimeUnit.mL_Per_min,
+                )
+                name = _snake_case(str(compound))
+                if rate_ml_per_min is not None and rate_ml_per_min > 0:
+                    self._runtime.active_infusions[name] = rate_ml_per_min
+                else:
+                    self._runtime.active_infusions.pop(name, None)
+            return
+
         if isinstance(action, SESubstanceInfusion) and action.has_substance():
-            substance = action.get_substance()
+            substance = str(action.get_substance())
             rate_ml_per_min = self._get_scalar_value(
                 action,
                 "has_rate",
@@ -566,19 +878,20 @@ class PulseEngineAdapter:
                     else rate_ml_per_min
                 )
 
+            name = _snake_case(substance)
             if delivered_dose is not None and delivered_dose > 0:
-                self._runtime.active_infusions[substance] = delivered_dose
+                self._runtime.active_infusions[name] = delivered_dose
             else:
-                self._runtime.active_infusions.pop(substance, None)
+                self._runtime.active_infusions.pop(name, None)
 
     def _is_alive_from_metrics(self, metrics: dict[str, float | None]) -> bool:
         if self._has_terminal_event():
             return False
 
         heart_rate = metrics.get("heart_rate_bpm")
-        map_mmhg = metrics.get("mean_arterial_pressure_mm_hg")
+        map_mmhg = metrics.get("mean_arterial_pressure_mmhg")
         spo2 = metrics.get("oxygen_saturation")
-        etco2 = metrics.get("end_tidal_carbon_dioxide_pressure_mm_hg")
+        etco2 = metrics.get("end_tidal_carbon_dioxide_pressure_mmhg")
 
         if heart_rate is not None and heart_rate <= 0.1:
             return False
@@ -605,6 +918,9 @@ class PulseEngineAdapter:
             right_absent = True
         elif self._runtime.intubation_type == eIntubationType.RightMainstem.name:
             left_absent = True
+        elif self._runtime.intubation_type == eIntubationType.Esophageal.name:
+            left_absent = True
+            right_absent = True
 
         if "left" in self._runtime.active_tension_pneumothorax_sides:
             left_absent = True
@@ -627,15 +943,10 @@ class PulseEngineAdapter:
             eIntubationType.Tracheal.name,
         }
 
-    def _derive_pain_level(self) -> float:
-        if not self._runtime.pain_sources:
-            return 0.0
-        return self._clamp01(max(self._runtime.pain_sources.values()))
-
-    def _derive_shock_index(self, heart_rate_bpm: float | None, systolic_bp_mm_hg: float | None) -> float | None:
-        if heart_rate_bpm is None or systolic_bp_mm_hg is None or systolic_bp_mm_hg <= 0:
+    def _derive_shock_index(self, heart_rate_bpm: float | None, systolic_bp_mmhg: float | None) -> float | None:
+        if heart_rate_bpm is None or systolic_bp_mmhg is None or systolic_bp_mmhg <= 0:
             return None
-        return heart_rate_bpm / systolic_bp_mm_hg
+        return heart_rate_bpm / systolic_bp_mmhg
 
     def _derive_lactate_trend(self, current_lactate_mg_per_dl: float | None) -> str:
         previous = self._last_lactate_mg_per_dl
@@ -647,11 +958,100 @@ class PulseEngineAdapter:
             return "stable"
         return "improving" if delta < 0 else "worsening"
 
+    def _derive_mental_status(
+        self,
+        metrics: dict[str, float | None],
+        is_alive: bool,
+    ) -> MentalStatus:
+        if not is_alive:
+            return "unresponsive"
+
+        score = 1.0 - (metrics.get("sedation_level") or 0.0)
+        map_mmhg = metrics.get("mean_arterial_pressure_mmhg")
+        spo2 = metrics.get("oxygen_saturation")
+
+        if map_mmhg is not None:
+            if map_mmhg < 45:
+                score = min(score, 0.1)
+            elif map_mmhg < 55:
+                score = min(score, 0.25)
+            elif map_mmhg < 65:
+                score = min(score, 0.55)
+            elif map_mmhg < 75:
+                score = min(score, 0.8)
+
+        if spo2 is not None:
+            if spo2 < 0.75:
+                score = min(score, 0.1)
+            elif spo2 < 0.85:
+                score = min(score, 0.25)
+            elif spo2 < 0.9:
+                score = min(score, 0.55)
+            elif spo2 < 0.94:
+                score = min(score, 0.8)
+
+        if score >= 0.85:
+            return "alert"
+        if score >= 0.6:
+            return "verbal"
+        if score >= 0.3:
+            return "pain"
+        return "unresponsive"
+
+    def _derive_alerts(
+        self,
+        metrics: dict[str, float | None],
+        is_alive: bool,
+        shock_index: float | None,
+    ) -> list[str]:
+        if not is_alive:
+            return ["cardiac_arrest"]
+
+        alerts: list[str] = []
+        heart_rate = metrics.get("heart_rate_bpm")
+        systolic = metrics.get("systolic_bp_mmhg")
+        map_mmhg = metrics.get("mean_arterial_pressure_mmhg")
+        spo2 = metrics.get("oxygen_saturation")
+        respiration_rate = metrics.get("respiration_rate_bpm")
+        blood_ph = metrics.get("blood_ph")
+
+        if heart_rate is not None and heart_rate >= 100:
+            alerts.append("tachycardia")
+        if heart_rate is not None and heart_rate <= 50:
+            alerts.append("bradycardia")
+        if systolic is not None and systolic < 90 or map_mmhg is not None and map_mmhg < 65:
+            alerts.append("hypotension")
+        if spo2 is not None and spo2 < 0.92:
+            alerts.append("hypoxemia")
+        if spo2 is not None and spo2 < 0.85:
+            alerts.append("severe_hypoxemia")
+        if respiration_rate is not None and respiration_rate >= 24:
+            alerts.append("tachypnea")
+        if respiration_rate is not None and respiration_rate <= 8:
+            alerts.append("bradypnea")
+        if shock_index is not None and shock_index >= 0.9:
+            alerts.append("shock_index_elevated")
+        if self._runtime.active_hemorrhages:
+            alerts.append("active_hemorrhage")
+        if self._runtime.active_tension_pneumothorax_sides:
+            alerts.append("possible_tension_pneumothorax")
+        if self._runtime.intubation_type == eIntubationType.Esophageal.name:
+            alerts.append("misplaced_airway")
+        breath_sounds = self._derive_breath_sounds()
+        if breath_sounds == "absent bilateral":
+            alerts.append("bilateral_absent_breath_sounds")
+        elif breath_sounds != "present bilateral":
+            alerts.append("unilateral_absent_breath_sounds")
+        if blood_ph is not None and blood_ph < 7.35:
+            alerts.append("acidosis")
+
+        return list(dict.fromkeys(alerts))
+
     @staticmethod
-    def _derive_bicarbonate_meq_per_l(ph: float | None, arterial_pco2_mm_hg: float | None) -> float | None:
-        if ph is None or arterial_pco2_mm_hg is None:
+    def _derive_bicarbonate_meq_per_l(ph: float | None, arterial_pco2_mmhg: float | None) -> float | None:
+        if ph is None or arterial_pco2_mmhg is None:
             return None
-        return 0.03 * arterial_pco2_mm_hg * (10 ** (ph - 6.1))
+        return 0.03 * arterial_pco2_mmhg * (10 ** (ph - 6.1))
 
     @staticmethod
     def _convert_mg_per_dl_to_mmol_per_l(value_mg_per_dl: float | None, molar_mass_g_per_mol: float) -> float | None:
@@ -678,10 +1078,6 @@ class PulseEngineAdapter:
         return name.split(".")[-1]
 
     @staticmethod
-    def _clamp01(value: float) -> float:
-        return max(0.0, min(value, 1.0))
-
-    @staticmethod
     def _get_scalar_value(
         action: Any,
         has_method_name: str,
@@ -699,3 +1095,13 @@ class PulseEngineAdapter:
             return float(scalar.get_value(unit) if unit is not None else scalar.get_value())
         except Exception:
             return None
+
+    @staticmethod
+    def _default_patient_id_from_state_file(state_file: Path) -> str:
+        stem = state_file.stem.split("@")[0]
+        return _snake_case(stem)
+
+    @staticmethod
+    def _normalize_compartment_name(compartment: Any) -> str:
+        name = getattr(compartment, "name", str(compartment))
+        return _snake_case(name)

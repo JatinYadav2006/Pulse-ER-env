@@ -29,7 +29,8 @@ Usage:
 """
 
 try:
-    from openenv.core.env_server.http_server import create_app
+    import openenv.core.env_server.http_server as openenv_http_server
+    import openenv.core.env_server.serialization as openenv_serialization
 except Exception as e:  # pragma: no cover
     raise ImportError(
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
@@ -41,6 +42,20 @@ try:
 except ModuleNotFoundError:
     from models import PulsePhysiologyAction, PulsePhysiologyObservation
     from server.pulse_physiology_env_environment import PulsePhysiologyEnvironment
+
+
+def _serialize_observation_with_metadata(observation):
+    obs_dict = observation.model_dump(exclude={"reward"})
+    return {
+        "observation": obs_dict,
+        "reward": observation.reward,
+        "done": observation.done,
+    }
+
+
+openenv_http_server.serialize_observation = _serialize_observation_with_metadata
+openenv_serialization.serialize_observation = _serialize_observation_with_metadata
+create_app = openenv_http_server.create_app
 
 
 # Create the app with web interface and README integration

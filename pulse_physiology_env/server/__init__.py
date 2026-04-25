@@ -6,13 +6,8 @@
 
 """Pulse Physiology Env environment server components."""
 
-<<<<<<< HEAD
 from .pulse_engine_adapter import PulseEngineAdapter
 from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
+from .tools import PulseToolExecutor
 
-__all__ = ["PulseEngineAdapter", "PulsePhysiologyEnvironment"]
-=======
-from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
-
-__all__ = ["PulsePhysiologyEnvironment"]
->>>>>>> 30e5d2f929a2c0efe7e6ca7c6c5be4da0e6ba97d
+__all__ = ["PulseEngineAdapter", "PulsePhysiologyEnvironment", "PulseToolExecutor"]
