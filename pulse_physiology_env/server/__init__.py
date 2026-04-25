@@ -6,7 +6,6 @@
 
 """Pulse Physiology Env environment server components."""
 
-<<<<<<< HEAD
 __all__: list[str] = []
 
 try:
@@ -29,11 +28,10 @@ except Exception:  # pragma: no cover - allows mock-side work without openenv in
     PulsePhysiologyEnvironment = None
 else:
     __all__.append("PulsePhysiologyEnvironment")
-=======
-from .pulse_engine_adapter import PulseEngineAdapter
-from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
-from .reward_engine import RewardEngine
-from .tools import PulseToolExecutor
 
-__all__ = ["PulseEngineAdapter", "PulsePhysiologyEnvironment", "PulseToolExecutor", "RewardEngine"]
->>>>>>> 348c7806b50268acf78399013eeda6aa0258545a
+try:
+    from .reward_engine import RewardEngine
+except Exception:  # pragma: no cover - allows imports when reward engine deps are unavailable
+    RewardEngine = None
+else:
+    __all__.append("RewardEngine")
