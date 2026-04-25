@@ -11,6 +11,9 @@ from openenv.core.env_server.types import EnvironmentMetadata, State
 try:
     from ..models import PulsePhysiologyAction, PulsePhysiologyObservation
     from ..patient_state import PatientState
+    from .atls_judge import ATLSJudge
+    from .pathology_architect import PathologyArchitect, PathologyBlueprint
+    from .patient_monitor import PatientMonitorVisualization
     from .pulse_engine_adapter import PulseEngineAdapter
     from .reward_engine import RewardBreakdown, RewardEngine, RewardTracker
     from .scenarios import DEFAULT_SCENARIO_ID, PatientProfile, ScenarioDefinition, get_scenario_definition
@@ -18,6 +21,9 @@ try:
 except ImportError:
     from models import PulsePhysiologyAction, PulsePhysiologyObservation
     from patient_state import PatientState
+    from server.atls_judge import ATLSJudge
+    from server.pathology_architect import PathologyArchitect, PathologyBlueprint
+    from server.patient_monitor import PatientMonitorVisualization
     from server.pulse_engine_adapter import PulseEngineAdapter
     from server.reward_engine import RewardBreakdown, RewardEngine, RewardTracker
     from server.scenarios import DEFAULT_SCENARIO_ID, PatientProfile, ScenarioDefinition, get_scenario_definition
@@ -33,12 +39,17 @@ class PulsePhysiologyEnvironment(Environment):
         self._adapter = PulseEngineAdapter()
         self._tool_executor = PulseToolExecutor(self._adapter)
         self._reward_engine = RewardEngine()
+        self._monitor = PatientMonitorVisualization()
+        self._atls_judge = ATLSJudge()
+        self._pathology_architect = PathologyArchitect()
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._scenario: ScenarioDefinition = get_scenario_definition(DEFAULT_SCENARIO_ID)
         self._selected_patient: PatientProfile | None = None
         self._latest_patient_state: PatientState | None = None
         self._reward_tracker: RewardTracker | None = None
         self._last_reward_breakdown = RewardBreakdown()
+        self._active_blueprint: PathologyBlueprint | None = None
+        self._state_history: list[PatientState] = []
 
     def reset(
         self,
@@ -48,8 +59,14 @@ class PulsePhysiologyEnvironment(Environment):
     ) -> PulsePhysiologyObservation:
         """Reset the environment and initialize the requested Pulse scenario."""
 
-        scenario_id = kwargs.get("scenario_id")
-        self._scenario = get_scenario_definition(str(scenario_id) if scenario_id is not None else DEFAULT_SCENARIO_ID)
+        blueprint = self._resolve_generated_blueprint(kwargs)
+        if blueprint is not None:
+            self._active_blueprint = blueprint
+            self._scenario = self._pathology_architect.to_scenario_definition(blueprint)
+        else:
+            self._active_blueprint = None
+            scenario_id = kwargs.get("scenario_id")
+            self._scenario = get_scenario_definition(str(scenario_id) if scenario_id is not None else DEFAULT_SCENARIO_ID)
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
         rng = random.Random(seed)
         self._selected_patient = self._scenario.choose_patient(rng)
@@ -72,6 +89,7 @@ class PulsePhysiologyEnvironment(Environment):
             difficulty_multiplier=self._reward_engine.DIFFICULTY_MULTIPLIER[self._scenario.difficulty],
             action_budget_remaining=self._reward_tracker.action_budget_remaining,
         )
+        self._state_history = [patient_state]
         return self._build_observation(
             patient_state,
             reward=0.0,
@@ -107,6 +125,8 @@ class PulsePhysiologyEnvironment(Environment):
         reward = breakdown.total
         self._latest_patient_state = current_state
         self._last_reward_breakdown = breakdown
+        self._state_history.append(current_state)
+        self._state_history = self._state_history[-PatientMonitorVisualization.MAX_TREND_POINTS :]
 
         return self._build_observation(
             current_state,
@@ -161,6 +181,17 @@ class PulsePhysiologyEnvironment(Environment):
             "action_budget_remaining": self._reward_tracker.action_budget_remaining if self._reward_tracker is not None else None,
             "reward_breakdown": self._last_reward_breakdown.as_metadata(),
             "available_tools": self._tool_executor.available_tools,
+            "patient_monitor": self._monitor.build(
+                history=self._state_history or [state],
+                action_history=self._reward_tracker.action_history if self._reward_tracker is not None else [],
+                current_state=state,
+            ).as_dict(),
+            "atls_judge": self._atls_judge.evaluate(
+                state=state,
+                action_history=self._reward_tracker.action_history if self._reward_tracker is not None else [],
+                reward_profile=self._scenario.reward_profile,
+            ).as_dict(),
+            "pathology_blueprint": self._active_blueprint.as_dict() if self._active_blueprint is not None else None,
         }
         return PulsePhysiologyObservation.from_patient_state(
             state,
@@ -170,3 +201,21 @@ class PulsePhysiologyEnvironment(Environment):
             error=error,
             metadata=metadata,
         )
+
+    def _resolve_generated_blueprint(self, kwargs: dict[str, object]) -> PathologyBlueprint | None:
+        raw_blueprint = kwargs.get("pathology_blueprint")
+        if isinstance(raw_blueprint, dict):
+            return self._pathology_architect.build_blueprint(
+                patient_id=str(raw_blueprint["patient_id"]),
+                injury_type=str(raw_blueprint["injury_type"]),
+                severity=float(raw_blueprint["severity"]),
+            )
+
+        required_keys = {"patient_id", "injury_type", "severity"}
+        if required_keys.issubset(kwargs):
+            return self._pathology_architect.build_blueprint(
+                patient_id=str(kwargs["patient_id"]),
+                injury_type=str(kwargs["injury_type"]),
+                severity=float(kwargs["severity"]),
+            )
+        return None
