@@ -47,6 +47,38 @@ def build_dataset(num_samples: int, prompt: str):
     )
 
 
+def _resolve_generation_schedule(
+    per_device_train_batch_size: int,
+    num_generations: int,
+) -> tuple[int, int]:
+    """Make the GRPO batch/generation schedule valid and predictable.
+
+    GRPO groups rollouts by prompt, so the generation batch size must be
+    divisible by ``num_generations``. For smoke runs we prefer to preserve the
+    requested number of generations and raise the batch size up to the nearest
+    valid multiple instead of silently reducing exploration.
+    """
+
+    if per_device_train_batch_size <= 0:
+        raise ValueError("per_device_train_batch_size must be greater than 0.")
+    if num_generations < 2:
+        raise ValueError("num_generations must be at least 2 for GRPO.")
+
+    if per_device_train_batch_size % num_generations == 0:
+        return per_device_train_batch_size, num_generations
+
+    adjusted_batch_size = (
+        ((per_device_train_batch_size + num_generations - 1) // num_generations)
+        * num_generations
+    )
+    print(
+        "Adjusted per_device_train_batch_size from "
+        f"{per_device_train_batch_size} to {adjusted_batch_size} so it is divisible by "
+        f"num_generations={num_generations}."
+    )
+    return adjusted_batch_size, num_generations
+
+
 def _extract_metric_history(log_history: list[dict], metric_name: str) -> list[dict[str, float]]:
     """Collect one scalar metric from trainer log history."""
 
@@ -161,7 +193,7 @@ def main() -> None:
     parser.add_argument("--num-generations", type=int, default=4)
     parser.add_argument("--max-steps", type=int, default=1024)
     parser.add_argument("--learning-rate", type=float, default=1e-6)
-    parser.add_argument("--per-device-train-batch-size", type=int, default=2)
+    parser.add_argument("--per-device-train-batch-size", type=int, default=4)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
@@ -186,6 +218,10 @@ def main() -> None:
     use_cpu = bool(args.use_cpu or not cuda_available)
     bf16_enabled = bool(cuda_available and not use_cpu and torch.cuda.is_bf16_supported())
     fp16_enabled = bool(cuda_available and not use_cpu and not bf16_enabled)
+    per_device_train_batch_size, num_generations = _resolve_generation_schedule(
+        args.per_device_train_batch_size,
+        args.num_generations,
+    )
 
     configure_trl_env(
         env_url=args.env_url,
@@ -204,11 +240,11 @@ def main() -> None:
         args=GRPOConfig(
             output_dir=args.output_dir,
             learning_rate=args.learning_rate,
-            per_device_train_batch_size=args.per_device_train_batch_size,
+            per_device_train_batch_size=per_device_train_batch_size,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             num_train_epochs=args.num_train_epochs,
             max_completion_length=args.max_steps,
-            num_generations=args.num_generations,
+            num_generations=num_generations,
             log_completions=True,
             use_cpu=use_cpu,
             bf16=bf16_enabled,
