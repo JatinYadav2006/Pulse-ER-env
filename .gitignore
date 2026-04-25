@@ -1,26 +1,15 @@
-# Pulse engine build artifacts
-engine-build/
-*.lib
-*.dll
-*.exe
-*.pdb
-*.obj
-*.a
-*.so
-*.dylib
+# Ignore compiled build artifacts
+engine-build/install/bin/
+engine-build/CMakeFiles/
+engine-build/*.cmake
+engine-build/Makefile
+engine-build/**/*.dll
+engine-build/**/*.exe
+engine-build/**/*.lib
+engine-build/**/*.pdb
+engine-build/**/*.obj
+engine-build/**/*.so
+engine-build/**/*.a
 
-# CMake artifacts
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-
-# Python cache
-__pycache__/
-*.pyc
-*.pyo
-
-# VS / IDE
-.vs/
-*.user
-*.suo
+# But NOT the python API - let that through
+!engine-build/install/python/
