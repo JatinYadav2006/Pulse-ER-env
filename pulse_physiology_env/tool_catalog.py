@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 
@@ -32,6 +33,33 @@ class ToolSpec:
 
 class ToolValidationError(ValueError):
     """Raised when a tool call payload violates the frozen contract."""
+
+
+_NUMERIC_PREFIX_RE = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?)")
+
+
+def _coerce_numeric_argument(value: Any) -> float:
+    """Coerce model-emitted numeric strings like ``2LPM`` into floats.
+
+    The policy layer sometimes emits recoverable formatting artifacts such as
+    ``"2LPM"`` or ``"500 ml"``. These should be treated as parsing noise
+    rather than hard clinical failures, as long as a leading numeric value is
+    still obvious and unambiguous.
+    """
+
+    if isinstance(value, bool):
+        raise TypeError("boolean values are not valid numeric tool arguments")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        compact = value.strip().replace(",", "")
+        try:
+            return float(compact)
+        except ValueError:
+            match = _NUMERIC_PREFIX_RE.match(compact)
+            if match is not None:
+                return float(match.group(1))
+    raise ValueError("numeric coercion failed")
 
 
 TOOL_SPECS: tuple[ToolSpec, ...] = (
@@ -502,7 +530,7 @@ def validate_tool_arguments(
 
         if arg_spec.numeric:
             try:
-                numeric_value = float(value)
+                numeric_value = _coerce_numeric_argument(value)
             except (TypeError, ValueError) as exc:
                 raise ToolValidationError(
                     f"{tool_name}.{arg_spec.name} must be numeric."
