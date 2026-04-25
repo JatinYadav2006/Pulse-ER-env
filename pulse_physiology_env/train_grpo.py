@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+import subprocess
 from pathlib import Path
+from typing import Any
 
+from .server.mock_scenarios import DEFAULT_MOCK_SCENARIO_ID, MOCK_SCENARIOS
 from .trl_env import configure_trl_env, get_environment_factory
 
 
@@ -22,6 +26,7 @@ DEFAULT_PROMPT = (
 )
 
 DEFAULT_SMOKE_MODEL = "Qwen/Qwen3-0.6B"
+DEFAULT_REAL_SCENARIO_ID = "polytrauma_demo"
 
 
 def pulse_reward(environments, **kwargs) -> list[float]:
@@ -47,6 +52,39 @@ def build_dataset(num_samples: int, prompt: str):
             "scenario_id": [None] * num_samples,
         }
     )
+
+
+def _resolve_backend_scenario(*, backend: str, scenario: str | None) -> str:
+    """Resolve and validate scenario_id for the selected backend."""
+
+    if backend == "mock":
+        if not scenario:
+            return DEFAULT_MOCK_SCENARIO_ID
+        if scenario not in MOCK_SCENARIOS:
+            valid = ", ".join(sorted(MOCK_SCENARIOS))
+            raise ValueError(
+                f"Unsupported mock scenario '{scenario}'. Expected one of: {valid}. "
+                f"Use --backend real for Pulse scenarios such as '{DEFAULT_REAL_SCENARIO_ID}'."
+            )
+        return scenario
+
+    if not scenario:
+        return DEFAULT_REAL_SCENARIO_ID
+
+    # Real scenario validation is optional because importing real scenario modules can
+    # require Pulse runtime dependencies that are not always present in lightweight setups.
+    try:
+        from .server.scenarios import SCENARIOS
+    except Exception:
+        return scenario
+
+    if scenario not in SCENARIOS:
+        valid = ", ".join(sorted(SCENARIOS))
+        raise ValueError(
+            f"Unsupported real scenario '{scenario}'. Expected one of: {valid}. "
+            f"Use --backend mock for deterministic mock scenarios such as '{DEFAULT_MOCK_SCENARIO_ID}'."
+        )
+    return scenario
 
 
 def _resolve_generation_schedule(
@@ -81,16 +119,31 @@ def _resolve_generation_schedule(
     return adjusted_batch_size, num_generations
 
 
-def _extract_metric_history(log_history: list[dict], metric_name: str) -> list[dict[str, float]]:
-    """Collect one scalar metric from trainer log history."""
+def _extract_metric_history(
+    log_history: list[dict],
+    metric_names: str | tuple[str, ...],
+) -> list[dict[str, float]]:
+    """Collect one scalar metric from trainer log history.
 
+    TRL log keys vary slightly across versions. We accept a preferred metric
+    name plus fallback aliases so reward artifacts keep working across local
+    and Colab runs.
+    """
+
+    if isinstance(metric_names, str):
+        metric_names = (metric_names,)
     points: list[dict[str, float]] = []
     for record in log_history:
-        if metric_name not in record:
-            continue
         if "step" not in record:
             continue
-        points.append({"step": float(record["step"]), "value": float(record[metric_name])})
+        metric_value = None
+        for metric_name in metric_names:
+            if metric_name in record:
+                metric_value = record[metric_name]
+                break
+        if metric_value is None:
+            continue
+        points.append({"step": float(record["step"]), "value": float(metric_value)})
     return points
 
 
@@ -100,7 +153,7 @@ def _write_metric_artifacts(output_dir: Path, log_history: list[dict]) -> None:
     metrics_dir = output_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    reward_points = _extract_metric_history(log_history, "train/reward")
+    reward_points = _extract_metric_history(log_history, ("reward", "train/reward"))
     loss_points = _extract_metric_history(log_history, "loss")
 
     (metrics_dir / "reward_history.json").write_text(json.dumps(reward_points, indent=2), encoding="utf-8")
@@ -122,6 +175,29 @@ def _write_metric_artifacts(output_dir: Path, log_history: list[dict]) -> None:
         points=loss_points,
         line_color="#0d6efd",
     )
+
+
+def _detect_git_commit() -> str | None:
+    """Return HEAD commit hash if available."""
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _write_run_manifest(output_dir: Path, payload: dict[str, Any]) -> None:
+    """Persist run metadata so training results are reproducible."""
+
+    manifest_path = output_dir / "run_manifest.json"
+    manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _write_svg_plot(
@@ -189,7 +265,7 @@ def main() -> None:
     parser.add_argument("--backend", default="mock", choices=("mock", "real"))
     parser.add_argument("--model", default=DEFAULT_SMOKE_MODEL)
     parser.add_argument("--env-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--scenario", default="polytrauma_demo")
+    parser.add_argument("--scenario", default=None)
     parser.add_argument("--output-dir", default="outputs/pulse_er_grpo")
     parser.add_argument("--num-samples", type=int, default=32)
     parser.add_argument("--num-generations", type=int, default=4)
@@ -200,6 +276,7 @@ def main() -> None:
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--use-cpu", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     try:
@@ -224,10 +301,15 @@ def main() -> None:
         args.per_device_train_batch_size,
         args.num_generations,
     )
+    scenario_id = _resolve_backend_scenario(backend=args.backend, scenario=args.scenario)
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     configure_trl_env(
         env_url=args.env_url,
-        scenario_id=args.scenario,
+        scenario_id=scenario_id,
         backend_kind=args.backend,
     )
     if "qwen2.5" in args.model.lower():
@@ -260,6 +342,27 @@ def main() -> None:
             chat_template_kwargs={"enable_thinking": False},
         ),
         environment_factory=environment_factory,
+    )
+    _write_run_manifest(
+        output_dir,
+        {
+            "backend": args.backend,
+            "scenario_id": scenario_id,
+            "model": args.model,
+            "env_url": args.env_url,
+            "seed": args.seed,
+            "num_samples": args.num_samples,
+            "num_generations": num_generations,
+            "max_steps": args.max_steps,
+            "learning_rate": args.learning_rate,
+            "per_device_train_batch_size": per_device_train_batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "num_train_epochs": args.num_train_epochs,
+            "use_cpu": use_cpu,
+            "bf16": bf16_enabled,
+            "fp16": fp16_enabled,
+            "git_commit": _detect_git_commit(),
+        },
     )
     trainer.train()
     trainer.save_state()

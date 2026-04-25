@@ -33,6 +33,11 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
 ]
+training = [
+    "datasets",
+    "torch",
+    "trl",
+]
 
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server

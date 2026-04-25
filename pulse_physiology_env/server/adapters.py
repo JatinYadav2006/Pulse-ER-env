@@ -88,6 +88,11 @@ class MockPulseAdapter(PatientBackend):
 
     def reset(self, scenario_id: str | None = None) -> EnvironmentResponse:
         selected_scenario_id = scenario_id or self._default_scenario_id
+        if selected_scenario_id not in MOCK_SCENARIOS:
+            valid = ", ".join(sorted(MOCK_SCENARIOS))
+            raise ValueError(
+                f"Unknown mock scenario_id '{selected_scenario_id}'. Expected one of: {valid}"
+            )
         scenario = MOCK_SCENARIOS[selected_scenario_id]
 
         self._scenario = scenario

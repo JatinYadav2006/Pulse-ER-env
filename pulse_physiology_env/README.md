@@ -54,13 +54,16 @@ Implemented now:
 - smoke tests in [smoke_test.py](./smoke_test.py)
 - reward logic in [rewards.py](./rewards.py)
 - policy comparison harness in [eval_mock.py](./eval_mock.py)
+- submission-facing GRPO training path in [train_grpo.py](./train_grpo.py)
+- TRL environment factory bridge in [trl_env.py](./trl_env.py)
+- judge-friendly reward and loss artifacts emitted to `metrics/`
 
 Still in progress:
 
 - formal swap from the mock adapter boundary to the real runtime boundary for training-facing loops
 - final alignment review between the frozen contract and the richer real runtime state
 - integration verification that mock-side consumer code continues to work cleanly against the real path
-- submission-facing TRL/Unsloth training artifacts, reward plots, and Hugging Face Space packaging
+- final Hugging Face Space packaging and polished submission bundle assembly
 
 ## Tier Framing
 
@@ -187,7 +190,7 @@ expert > llm_demo > random > no_action
 This requires the OpenEnv dependency stack to be installed.
 
 ```bash
-uvicorn server.app:app --reload
+uvicorn pulse_physiology_env.server.app:app --reload
 ```
 
 ### 4. Submission-Facing GRPO Training
@@ -200,14 +203,41 @@ entrypoint is [train_grpo.py](./train_grpo.py), which uses:
 - the TRL/OpenEnv-style [trl_env.py](./trl_env.py) environment factory
 - GRPO over the running OpenEnv server
 
+Install training dependencies:
+
+```bash
+pip install -e ".[training]"
+```
+
 Example local launch:
 
 ```bash
 python -m pulse_physiology_env.train_grpo \
-  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --backend mock \
+  --scenario respiratory_distress \
+  --model Qwen/Qwen3-0.6B \
   --env-url http://127.0.0.1:8000 \
-  --scenario polytrauma_demo
+  --output-dir outputs/pulse_er_grpo_mock
 ```
+
+Supported-path default behavior:
+
+- `--backend mock` without `--scenario` defaults to `baseline_stable`
+- `--backend real` without `--scenario` defaults to `polytrauma_demo`
+- invalid scenarios fail fast with a clear backend-specific message
+
+This entrypoint writes lightweight submission artifacts to
+`<output-dir>/metrics/`, including:
+
+- `reward_history.json`
+- `loss_history.json`
+- `reward_curve.svg`
+- `loss_curve.svg`
+- `<output-dir>/run_manifest.json` (seed/config/model/backend/commit metadata)
+
+For the current tool-calling GRPO setup, `Qwen/Qwen3-0.6B` is the most
+reliable default smoke model. Some `Qwen2.5` variants do not interact cleanly
+with the current TRL response-schema utility.
 
 The internal [train_online.py](./train_online.py) script is still useful for
 fast smoke testing and feature debugging, but it is not the primary
@@ -259,6 +289,11 @@ pulse_physiology_env/
 |-- rewards.py
 |-- smoke_test.py
 |-- eval_mock.py
+|-- real_backend.py
+|-- gym_env.py
+|-- train_online.py
+|-- train_grpo.py
+|-- trl_env.py
 |-- generate_seed_trajectories.py
 `-- server/
     |-- __init__.py
@@ -279,3 +314,33 @@ This README is meant to help three audiences quickly:
 - **teammates**: understand the ownership split and integration contract
 - **judges**: understand the product direction and the clinical-tool framing
 - **future us**: remember what is mock scaffolding versus what is already real Pulse-backed behavior
+
+## Judge-Ready Status
+
+Use this supported validation path for submission evidence:
+
+```bash
+python -m pulse_physiology_env.smoke_test
+python -m pulse_physiology_env.eval_mock
+python -m pulse_physiology_env.integration_smoke
+```
+
+Expected benchmark ordering:
+
+```text
+expert > llm_demo > random > no_action
+```
+
+Known limitations (truthful scope):
+
+- mock benchmark values are deterministic references, not guaranteed real-runtime score targets
+- full Pulse runtime setup depends on local Pulse installation and environment compatibility
+- `train_grpo.py` is the submission-facing trainer; `train_online.py` remains an internal smoke/debug path
+
+## Reproducibility Checklist
+
+- keep `--backend` and `--scenario` aligned (defaults are backend-aware)
+- set and record a fixed `--seed` for each run
+- archive `<output-dir>/run_manifest.json` with metrics artifacts
+- keep model id and environment URL identical between repeat runs
+- avoid changing contract fields in [SPEC.md](./SPEC.md) during submission freeze

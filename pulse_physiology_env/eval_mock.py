@@ -398,6 +398,11 @@ def _regression_check_gym_wrapper() -> None:
         if step_info["tool_name"] != "get_vitals":
             raise SystemExit("Gym wrapper regression failed: expected get_vitals in step info.")
 
+        # Build a deterministic masked-action fixture so invalid-action behavior
+        # is tested even when a backend exposes a broad tool set.
+        env._current_observation = env._current_observation.model_copy(  # type: ignore[attr-defined]
+            update={"available_tools": ["get_vitals"]}
+        )
         invalid_index = env.tool_names.index("give_pressor")
         _, invalid_reward, invalid_terminated, invalid_truncated, invalid_info = env.step(invalid_index)
         if not invalid_info["invalid_action"]:

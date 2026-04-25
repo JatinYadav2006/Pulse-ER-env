@@ -19,13 +19,13 @@ Endpoints:
 
 Usage:
     # Development (with auto-reload):
-    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
+    uvicorn pulse_physiology_env.server.app:app --reload --host 0.0.0.0 --port 8000
 
     # Production:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 4
+    uvicorn pulse_physiology_env.server.app:app --host 0.0.0.0 --port 8000 --workers 4
 
     # Or run directly:
-    python -m server.app
+    python -m pulse_physiology_env.server.app
 """
 
 from pydantic import BaseModel, Field
