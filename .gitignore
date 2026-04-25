@@ -1,19 +1,6 @@
-# Pulse engine build artifacts
+# Ignore engine and build folders
+engine/
 engine-build/
-*.lib
-*.dll
-*.exe
-*.pdb
-*.obj
-*.a
-*.so
-*.dylib
-
-# CMake artifacts
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
 
 # Python cache
 __pycache__/
