@@ -40,12 +40,10 @@ except Exception as e:  # pragma: no cover
     ) from e
 
 try:
-    from ..models import PulsePhysiologyAction, PulsePhysiologyObservation
-    from .pathology_architect import PathologyArchitect
+    from ..models import PulsePhysiologyObservation, ToolAction
     from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
 except ModuleNotFoundError:
-    from models import PulsePhysiologyAction, PulsePhysiologyObservation
-    from server.pathology_architect import PathologyArchitect
+    from models import PulsePhysiologyObservation, ToolAction
     from server.pulse_physiology_env_environment import PulsePhysiologyEnvironment
 
 
@@ -74,7 +72,7 @@ create_app = openenv_http_server.create_app
 # Create the app with web interface and README integration
 app = create_app(
     PulsePhysiologyEnvironment,
-    PulsePhysiologyAction,
+    ToolAction,
     PulsePhysiologyObservation,
     env_name="pulse_physiology_env",
     max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions

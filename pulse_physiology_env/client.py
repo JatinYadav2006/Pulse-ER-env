@@ -1,4 +1,10 @@
-"""Pulse Physiology Env Environment Client."""
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Pulse-ER environment client."""
 
 from __future__ import annotations
 
@@ -14,7 +20,7 @@ from .models import PulsePhysiologyAction, PulsePhysiologyObservation
 class PulsePhysiologyEnv(
     EnvClient[PulsePhysiologyAction, PulsePhysiologyObservation, State]
 ):
-    """Client for the Pulse-backed physiology environment."""
+    """Client for the structured Pulse-ER tool environment."""
 
     def _step_payload(self, action: PulsePhysiologyAction) -> Dict:
         return action.model_dump(exclude_none=True)
@@ -32,7 +38,7 @@ class PulsePhysiologyEnv(
         return StepResult(
             observation=observation,
             reward=payload.get("reward"),
-            done=payload.get("done", False),
+            done=payload.get("done", observation.done),
         )
 
     def _parse_state(self, payload: Dict) -> State:
