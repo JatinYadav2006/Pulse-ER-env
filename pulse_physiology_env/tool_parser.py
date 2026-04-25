@@ -8,7 +8,12 @@ import warnings
 from typing import Any
 
 from .models import ToolAction
-from .tool_catalog import KNOWN_TOOL_NAMES, ToolValidationError, validate_tool_arguments
+from .tool_catalog import (
+    KNOWN_TOOL_NAMES,
+    ToolValidationError,
+    canonicalize_tool_name,
+    validate_tool_arguments,
+)
 
 
 class ToolParseError(ValueError):
@@ -142,9 +147,10 @@ def parse_tool_action(
         raise ParseError(_format_parse_error("reasoning must be a string when provided.", text))
 
     valid_tools = allowed_tools or list(KNOWN_TOOL_NAMES)
+    canonical_tool_name = canonicalize_tool_name(tool_name, allowed_tools=valid_tools)
     try:
         normalized_arguments = validate_tool_arguments(
-            tool_name,
+            canonical_tool_name,
             arguments,
             allowed_tools=valid_tools,
         )
@@ -152,7 +158,7 @@ def parse_tool_action(
         raise ParseError(_format_parse_error(str(exc), text)) from exc
 
     return ToolAction(
-        tool_name=tool_name,
+        tool_name=canonical_tool_name,
         arguments=normalized_arguments,
         reasoning=reasoning,
     )

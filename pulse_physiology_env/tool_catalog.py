@@ -15,6 +15,7 @@ class ToolArgumentSpec:
     description: str
     required: bool = False
     numeric: bool = False
+    boolean: bool = False
     minimum: float | None = None
     choices: tuple[str, ...] = ()
 
@@ -36,9 +37,17 @@ class ToolValidationError(ValueError):
 
 
 _NUMERIC_PREFIX_RE = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?)")
+_TRUE_TOKENS = {"1", "true", "yes", "y", "on"}
+_FALSE_TOKENS = {"0", "false", "no", "n", "off"}
 
 
-def _coerce_numeric_argument(value: Any) -> float:
+def normalize_contract_token(value: Any) -> str:
+    """Normalize contract strings so harmless formatting differences do not fail closed."""
+
+    return str(value).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def coerce_numeric_argument(value: Any) -> float:
     """Coerce model-emitted numeric strings like ``2LPM`` into floats.
 
     The policy layer sometimes emits recoverable formatting artifacts such as
@@ -60,6 +69,22 @@ def _coerce_numeric_argument(value: Any) -> float:
             if match is not None:
                 return float(match.group(1))
     raise ValueError("numeric coercion failed")
+
+
+def coerce_boolean_argument(value: Any) -> bool:
+    """Coerce common boolean-like values emitted by models into real booleans."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in _TRUE_TOKENS:
+            return True
+        if token in _FALSE_TOKENS:
+            return False
+    raise ValueError("boolean coercion failed")
 
 
 TOOL_SPECS: tuple[ToolSpec, ...] = (
@@ -360,6 +385,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
             ToolArgumentSpec(
                 name="stop",
                 description="Set to true to stop the current infusion.",
+                boolean=True,
             ),
             ToolArgumentSpec(
                 name="monitor_seconds",
@@ -455,9 +481,24 @@ EXTENDED_TOOL_NAMES = [spec.tool_name for spec in TOOL_SPECS]
 KNOWN_TOOL_NAMES = EXTENDED_TOOL_NAMES
 
 
+def canonicalize_tool_name(tool_name: str, allowed_tools: list[str] | None = None) -> str:
+    """Map harmless casing or separator differences onto the canonical tool name."""
+
+    valid_tools = allowed_tools or list(KNOWN_TOOL_NAMES)
+    if tool_name in valid_tools:
+        return tool_name
+
+    normalized = normalize_contract_token(tool_name)
+    matches = [candidate for candidate in valid_tools if normalize_contract_token(candidate) == normalized]
+    if len(matches) == 1:
+        return matches[0]
+    return tool_name
+
+
 def get_tool_spec(tool_name: str) -> ToolSpec:
     """Return the registry entry for one tool name."""
 
+    tool_name = canonicalize_tool_name(tool_name)
     try:
         return TOOL_SPEC_BY_NAME[tool_name]
     except KeyError as exc:
@@ -483,6 +524,7 @@ def build_tool_catalog(available_tools: list[str] | None = None) -> list[dict[st
                         "description": arg.description,
                         "required": arg.required,
                         "numeric": arg.numeric,
+                        "boolean": arg.boolean,
                         "minimum": arg.minimum,
                         "choices": list(arg.choices),
                     }
@@ -501,6 +543,7 @@ def validate_tool_arguments(
 ) -> dict[str, Any]:
     """Validate and normalize structured arguments for one tool call."""
 
+    tool_name = canonicalize_tool_name(tool_name, allowed_tools=allowed_tools)
     if allowed_tools is not None and tool_name not in allowed_tools:
         raise ToolValidationError(
             f"Unsupported tool_name '{tool_name}'. Expected one of: {', '.join(allowed_tools)}"
@@ -530,7 +573,7 @@ def validate_tool_arguments(
 
         if arg_spec.numeric:
             try:
-                numeric_value = _coerce_numeric_argument(value)
+                numeric_value = coerce_numeric_argument(value)
             except (TypeError, ValueError) as exc:
                 raise ToolValidationError(
                     f"{tool_name}.{arg_spec.name} must be numeric."
@@ -542,16 +585,29 @@ def validate_tool_arguments(
             normalized[arg_spec.name] = numeric_value
             continue
 
+        if arg_spec.boolean:
+            try:
+                normalized[arg_spec.name] = coerce_boolean_argument(value)
+            except ValueError as exc:
+                raise ToolValidationError(
+                    f"{tool_name}.{arg_spec.name} must be boolean."
+                ) from exc
+            continue
+
         if arg_spec.choices:
             if not isinstance(value, str):
                 raise ToolValidationError(
                     f"{tool_name}.{arg_spec.name} must be a string."
                 )
-            if value not in arg_spec.choices:
+            normalized_choice = normalize_contract_token(value)
+            canonical_choices = {
+                normalize_contract_token(choice): choice for choice in arg_spec.choices
+            }
+            if normalized_choice not in canonical_choices:
                 raise ToolValidationError(
                     f"{tool_name}.{arg_spec.name} must be one of: {', '.join(arg_spec.choices)}"
                 )
-            normalized[arg_spec.name] = value
+            normalized[arg_spec.name] = canonical_choices[normalized_choice]
             continue
 
         normalized[arg_spec.name] = value

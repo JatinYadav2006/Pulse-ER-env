@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal, Sequence
 
 from pulse_physiology_env.patient_state import PatientState
+from pulse_physiology_env.tool_catalog import coerce_boolean_argument
 
 from .reward_engine import ActionRecord
 
@@ -76,6 +77,7 @@ class ATLSJudge:
         state: PatientState,
         action_history: Sequence[ActionRecord],
         reward_profile: str,
+        state_history: Sequence[PatientState] = (),
     ) -> ATLSJudgeReport:
         checks: list[ATLSCheck] = []
 
@@ -84,7 +86,7 @@ class ATLSJudge:
         checks.append(self._judge_hemorrhage_control(action_history, reward_profile, state))
         checks.append(self._judge_volume_then_pressor(action_history))
         checks.append(self._judge_diagnostics(action_history))
-        checks.append(self._judge_safety_violations(action_history))
+        checks.append(self._judge_safety_violations(action_history, state, state_history))
         checks.append(self._judge_final_state(state))
 
         score = max(0, min(100, 100 + sum(check.points for check in checks)))
@@ -144,7 +146,7 @@ class ATLSJudge:
         return ATLSCheck("warn", "Hemorrhage control", f"Hemorrhage control was delayed until step {bleed_idx + 1}.", -8)
 
     def _judge_volume_then_pressor(self, action_history: Sequence[ActionRecord]) -> ATLSCheck:
-        pressor_idx = self._first_index(action_history, self.PRESSOR_TOOLS)
+        pressor_idx = self._first_pressor_start_index(action_history)
         if pressor_idx == -1:
             return ATLSCheck("pass", "Pressor sequencing", "No pressor was used before volume status was clarified.", 0)
 
@@ -161,15 +163,19 @@ class ATLSJudge:
             return ATLSCheck("pass", "Diagnostics", "Diagnostics were ordered early enough to inform management.", 6)
         return ATLSCheck("warn", "Diagnostics", f"Diagnostics did not appear until step {diagnostic_idx + 1}.", -4)
 
-    def _judge_safety_violations(self, action_history: Sequence[ActionRecord]) -> ATLSCheck:
+    def _judge_safety_violations(
+        self,
+        action_history: Sequence[ActionRecord],
+        state: PatientState,
+        state_history: Sequence[PatientState],
+    ) -> ATLSCheck:
         restricted_idx = self._first_index(action_history, self.RESTRICTED_TOOLS)
         if restricted_idx != -1:
             tool_name = action_history[restricted_idx].tool_name
             return ATLSCheck("fail", "Simulation safety", f"Scenario-authoring tool '{tool_name}' was used inside live care flow.", -20)
 
         cpr_idx = self._first_index(action_history, self.CPR_TOOLS)
-        arrest_idx = self._first_index(action_history, {"induce_cardiac_arrest"})
-        if cpr_idx != -1 and (arrest_idx == -1 or arrest_idx > cpr_idx):
+        if cpr_idx != -1 and not self._cpr_had_documented_arrest(cpr_idx, state, state_history, action_history):
             return ATLSCheck("fail", "Simulation safety", "CPR was started without a documented arrest transition.", -16)
 
         succ_idx = self._first_index(action_history, {"administer_succinylcholine_bolus"})
@@ -196,6 +202,41 @@ class ATLSJudge:
             if record.success and record.tool_name in tool_names:
                 return idx
         return -1
+
+    def _first_pressor_start_index(self, action_history: Sequence[ActionRecord]) -> int:
+        for idx, record in enumerate(action_history):
+            if record.success and self._record_is_pressor_start(record):
+                return idx
+        return -1
+
+    @staticmethod
+    def _record_is_pressor_start(record: ActionRecord) -> bool:
+        if record.tool_name not in ATLSJudge.PRESSOR_TOOLS or record.tool_name == "stop_infusion":
+            return False
+        if record.tool_name != "give_pressor":
+            return True
+        try:
+            return not coerce_boolean_argument(record.arguments.get("stop", False))
+        except ValueError:
+            return True
+
+    def _cpr_had_documented_arrest(
+        self,
+        cpr_idx: int,
+        current_state: PatientState,
+        state_history: Sequence[PatientState],
+        action_history: Sequence[ActionRecord],
+    ) -> bool:
+        arrest_idx = self._first_index(action_history, {"induce_cardiac_arrest"})
+        if arrest_idx != -1 and arrest_idx <= cpr_idx:
+            return True
+
+        if state_history:
+            prior_states = list(state_history[: cpr_idx + 1])
+            if any("cardiac_arrest" in state.active_alerts for state in prior_states):
+                return True
+
+        return "cardiac_arrest" in current_state.active_alerts
 
     @staticmethod
     def _build_verdict(score: int) -> str:
