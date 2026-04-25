@@ -6,7 +6,8 @@ import json
 from typing import Any
 
 from .models import PulsePhysiologyObservation
-from .tool_catalog import INITIAL_TOOL_NAMES, build_tool_catalog as build_shared_tool_catalog
+from .tool_availability import validate_tool_availability
+from .tool_catalog import build_tool_catalog as build_shared_tool_catalog
 
 
 def _mental_status_value(mental_status: Any) -> str:
@@ -39,9 +40,10 @@ def observation_snapshot(observation: PulsePhysiologyObservation) -> dict[str, A
 
 
 def build_tool_catalog(available_tools: list[str] | None = None) -> list[dict[str, Any]]:
-    """Build a prompt-safe catalog from the shared tool registry."""
+    """Build a prompt-safe catalog from a validated backend tool list."""
 
-    return build_shared_tool_catalog(available_tools or list(INITIAL_TOOL_NAMES))
+    validated_tools = validate_tool_availability(available_tools)
+    return build_shared_tool_catalog(validated_tools)
 
 
 def build_policy_prompt(
@@ -53,8 +55,11 @@ def build_policy_prompt(
 ) -> str:
     """Render a prompt asking a model to choose the next tool action."""
 
+    validated_tools = validate_tool_availability(
+        available_tools if available_tools is not None else observation.available_tools
+    )
     snapshot = observation_snapshot(observation)
-    tool_catalog = build_tool_catalog(available_tools or observation.available_tools)
+    tool_catalog = build_tool_catalog(validated_tools)
     history = recent_history or []
     objective_text = objective or (
         "Choose the single best next tool call to stabilize the patient and avoid deterioration."

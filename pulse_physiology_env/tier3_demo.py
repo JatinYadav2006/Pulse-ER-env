@@ -57,10 +57,15 @@ def main() -> None:
     trace = _warmup_trace(args.scenario, args.warmup_policy, args.max_steps)
     observation = trace.final_observation
     previous_observation = trace.steps[-1].observation if trace.steps else None
+    observation_history = [trace.initial_observation, *(step.observation for step in trace.steps)]
 
     triage = build_triage_summary(observation)
     recommendation = recommend_next_step(observation)
-    explanation = explain_deterioration(observation, previous_observation)
+    explanation = explain_deterioration(
+        observation,
+        previous_observation,
+        observations=observation_history,
+    )
     plan = generate_intervention_plan(observation)
     episode_report = build_episode_report(trace) if trace.steps else None
 

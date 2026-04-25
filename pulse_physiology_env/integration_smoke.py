@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
+from pathlib import Path
 
 from pulse_physiology_env.models import INITIAL_TOOL_NAMES, ToolAction
 from pulse_physiology_env.server.mock_scenarios import DEFAULT_MOCK_SCENARIO_ID
@@ -33,11 +35,57 @@ REQUIRED_OBSERVATION_FIELDS = {
 REQUIRED_ENVELOPE_FIELDS = {"observation", "reward", "done", "metadata", "tool_result", "error"}
 
 
+class _ConstructorNoScenarioBackend:
+    """Regression-only backend stub with a constructor that accepts no scenario args."""
+
+    def __init__(self) -> None:
+        self.default_scenario_id = DEFAULT_MOCK_SCENARIO_ID
+
+    def set_default_scenario(self, scenario_id: str) -> None:
+        self.default_scenario_id = scenario_id
+
+    def reset(self, scenario_id: str | None = None):
+        from pulse_physiology_env.server.adapters import MockPulseAdapter
+
+        backend = MockPulseAdapter(default_scenario_id=scenario_id or self.default_scenario_id)
+        return backend.reset(scenario_id or self.default_scenario_id)
+
+    def step(self, action):
+        from pulse_physiology_env.server.adapters import MockPulseAdapter
+
+        backend = MockPulseAdapter(default_scenario_id=self.default_scenario_id)
+        backend.reset(self.default_scenario_id)
+        return backend.step(action)
+
+
+def _set_scenario_if_supported(backend, scenario_id: str) -> None:
+    """Set the default scenario when a backend exposes a dedicated mutator hook.
+
+    The mock and real adapters may temporarily diverge in constructor shape
+    during integration, so the smoke test cannot assume every backend accepts
+    ``default_scenario_id`` at construction time.
+    """
+
+    for method_name in ("set_default_scenario_id", "set_default_scenario", "set_scenario"):
+        method = getattr(backend, method_name, None)
+        if callable(method):
+            method(scenario_id)
+            return
+
+
 def _load_backend(backend_class_path: str, scenario_id: str):
     module_name, class_name = backend_class_path.split(":", 1)
     module = importlib.import_module(module_name)
     backend_cls = getattr(module, class_name)
-    return backend_cls(default_scenario_id=scenario_id)
+    init_signature = inspect.signature(backend_cls)
+    init_parameters = init_signature.parameters
+
+    if "default_scenario_id" in init_parameters:
+        return backend_cls(default_scenario_id=scenario_id)
+
+    backend = backend_cls()
+    _set_scenario_if_supported(backend, scenario_id)
+    return backend
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -52,6 +100,34 @@ def _check_response_shape(result, label: str) -> None:
     _assert(REQUIRED_OBSERVATION_FIELDS <= set(observation), f"{label}: missing required observation fields")
     _assert(payload["done"] == observation["done"], f"{label}: done mismatch between envelope and observation")
     _assert(isinstance(payload["metadata"].get("available_tools"), list), f"{label}: metadata.available_tools must be a list")
+
+
+def _regression_check_constructor_flexibility() -> None:
+    """Ensure backend loading works even when the constructor omits scenario kwargs."""
+
+    backend = _load_backend(
+        "pulse_physiology_env.integration_smoke:_ConstructorNoScenarioBackend",
+        DEFAULT_MOCK_SCENARIO_ID,
+    )
+    _assert(
+        getattr(backend, "default_scenario_id", None) == DEFAULT_MOCK_SCENARIO_ID,
+        "constructor_flexibility: scenario setter fallback did not prime the backend",
+    )
+
+
+def _regression_check_readme_frontmatter() -> None:
+    """Ensure README frontmatter does not contain the old mojibake emoji string."""
+
+    readme_path = Path(__file__).resolve().parent / "README.md"
+    frontmatter = readme_path.read_text(encoding="utf-8").splitlines()[:5]
+    _assert(
+        any(line == "emoji: 🩺" for line in frontmatter),
+        "readme_frontmatter: expected a clean UTF-8 emoji entry in README frontmatter",
+    )
+    _assert(
+        not any("ðŸ" in line for line in frontmatter),
+        "readme_frontmatter: found mojibake in README frontmatter",
+    )
 
 
 def main() -> None:
@@ -69,6 +145,11 @@ def main() -> None:
     print("Integration smoke check\n")
     print(f"backend_class: {args.backend_class}")
     print(f"scenario: {args.scenario}\n")
+
+    _regression_check_constructor_flexibility()
+    print("PASS constructor flexibility")
+    _regression_check_readme_frontmatter()
+    print("PASS README frontmatter encoding")
 
     reset_result = backend.reset(args.scenario)
     _check_response_shape(reset_result, "reset")

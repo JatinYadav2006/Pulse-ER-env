@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pulse_physiology_env.models import ToolAction
+from pulse_physiology_env.models import PulsePhysiologyObservation, ToolAction
 from pulse_physiology_env.server.adapters import MockPulseAdapter
+from pulse_physiology_env.tier3_workflows import explain_deterioration
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,168 @@ def print_summary(summary: dict) -> None:
     print(f"  done: {summary['done']}")
 
 
+def _observation_fixture(
+    *,
+    sim_time_s: float,
+    heart_rate_bpm: float,
+    systolic_bp_mmhg: float,
+    diastolic_bp_mmhg: float,
+    spo2: float,
+    respiration_rate_bpm: float,
+    active_alerts: list[str],
+) -> PulsePhysiologyObservation:
+    """Build a compact observation fixture for Tier 3 regression checks."""
+
+    return PulsePhysiologyObservation(
+        scenario_id="regression_case",
+        patient_id="tier3_fixture",
+        sim_time_s=sim_time_s,
+        heart_rate_bpm=heart_rate_bpm,
+        systolic_bp_mmhg=systolic_bp_mmhg,
+        diastolic_bp_mmhg=diastolic_bp_mmhg,
+        spo2=spo2,
+        respiration_rate_bpm=respiration_rate_bpm,
+        blood_volume_ml=5400.0,
+        active_alerts=active_alerts,
+        available_tools=["get_vitals", "check_deterioration", "advance_time"],
+    )
+
+
+def _regression_check_tier3_statuses() -> None:
+    """Validate nuanced Tier 3 status classification across core severity buckets."""
+
+    stable_history = [
+        _observation_fixture(
+            sim_time_s=0.0,
+            heart_rate_bpm=72.0,
+            systolic_bp_mmhg=118.0,
+            diastolic_bp_mmhg=76.0,
+            spo2=0.98,
+            respiration_rate_bpm=14.0,
+            active_alerts=[],
+        ),
+        _observation_fixture(
+            sim_time_s=30.0,
+            heart_rate_bpm=71.0,
+            systolic_bp_mmhg=119.0,
+            diastolic_bp_mmhg=77.0,
+            spo2=0.98,
+            respiration_rate_bpm=14.0,
+            active_alerts=[],
+        ),
+        _observation_fixture(
+            sim_time_s=60.0,
+            heart_rate_bpm=70.0,
+            systolic_bp_mmhg=120.0,
+            diastolic_bp_mmhg=78.0,
+            spo2=0.99,
+            respiration_rate_bpm=14.0,
+            active_alerts=[],
+        ),
+    ]
+    monitoring_history = [
+        _observation_fixture(
+            sim_time_s=0.0,
+            heart_rate_bpm=102.0,
+            systolic_bp_mmhg=118.0,
+            diastolic_bp_mmhg=76.0,
+            spo2=0.97,
+            respiration_rate_bpm=18.0,
+            active_alerts=["tachycardia"],
+        ),
+        _observation_fixture(
+            sim_time_s=30.0,
+            heart_rate_bpm=104.0,
+            systolic_bp_mmhg=118.0,
+            diastolic_bp_mmhg=76.0,
+            spo2=0.97,
+            respiration_rate_bpm=18.0,
+            active_alerts=["tachycardia"],
+        ),
+        _observation_fixture(
+            sim_time_s=60.0,
+            heart_rate_bpm=106.0,
+            systolic_bp_mmhg=117.0,
+            diastolic_bp_mmhg=75.0,
+            spo2=0.97,
+            respiration_rate_bpm=18.0,
+            active_alerts=["tachycardia"],
+        ),
+    ]
+    deteriorating_history = [
+        _observation_fixture(
+            sim_time_s=0.0,
+            heart_rate_bpm=108.0,
+            systolic_bp_mmhg=110.0,
+            diastolic_bp_mmhg=70.0,
+            spo2=0.95,
+            respiration_rate_bpm=20.0,
+            active_alerts=["tachycardia"],
+        ),
+        _observation_fixture(
+            sim_time_s=30.0,
+            heart_rate_bpm=118.0,
+            systolic_bp_mmhg=96.0,
+            diastolic_bp_mmhg=60.0,
+            spo2=0.93,
+            respiration_rate_bpm=22.0,
+            active_alerts=["tachycardia", "hypotension"],
+        ),
+        _observation_fixture(
+            sim_time_s=60.0,
+            heart_rate_bpm=128.0,
+            systolic_bp_mmhg=85.0,
+            diastolic_bp_mmhg=50.0,
+            spo2=0.91,
+            respiration_rate_bpm=26.0,
+            active_alerts=["tachycardia", "hypotension", "tachypnea"],
+        ),
+    ]
+    critical_history = [
+        _observation_fixture(
+            sim_time_s=0.0,
+            heart_rate_bpm=120.0,
+            systolic_bp_mmhg=100.0,
+            diastolic_bp_mmhg=64.0,
+            spo2=0.92,
+            respiration_rate_bpm=24.0,
+            active_alerts=["hypoxemia", "tachypnea"],
+        ),
+        _observation_fixture(
+            sim_time_s=30.0,
+            heart_rate_bpm=132.0,
+            systolic_bp_mmhg=94.0,
+            diastolic_bp_mmhg=60.0,
+            spo2=0.88,
+            respiration_rate_bpm=28.0,
+            active_alerts=["hypoxemia", "tachypnea"],
+        ),
+        _observation_fixture(
+            sim_time_s=60.0,
+            heart_rate_bpm=146.0,
+            systolic_bp_mmhg=88.0,
+            diastolic_bp_mmhg=56.0,
+            spo2=0.82,
+            respiration_rate_bpm=32.0,
+            active_alerts=["hypoxemia", "tachypnea", "tachycardia"],
+        ),
+    ]
+
+    expectations = (
+        ("stable", "low", stable_history),
+        ("monitoring", "low", monitoring_history),
+        ("deteriorating", "medium", deteriorating_history),
+        ("critical", "imminent", critical_history),
+    )
+    for expected_status, expected_risk, history in expectations:
+        explanation = explain_deterioration(history[-1], observations=history)
+        if explanation.status != expected_status or explanation.cascade_risk != expected_risk:
+            raise SystemExit(
+                "Tier 3 regression failed: expected "
+                f"{expected_status}/{expected_risk}, got {explanation.status}/{explanation.cascade_risk}."
+            )
+
+
 def main() -> None:
     """Run scenario smoke tests and compare good vs bad trajectories."""
 
@@ -185,6 +348,8 @@ def main() -> None:
     if failures:
         raise SystemExit(f"Smoke test failed for scenarios: {', '.join(failures)}")
 
+    _regression_check_tier3_statuses()
+    print("PASS Tier 3 status classification")
     print("\nAll smoke tests passed.")
 
 

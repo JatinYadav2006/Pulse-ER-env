@@ -25,6 +25,9 @@ def episode_trace_to_dict(trace: EpisodeTrace) -> dict[str, Any]:
         "policy_name": trace.policy_name,
         "total_reward": trace.total_reward,
         "num_steps": trace.num_steps,
+        "termination_reason": trace.termination_reason.value,
+        "action_budget_remaining": trace.action_budget_remaining,
+        "events": list(trace.events),
         "initial_observation": _observation_to_dict(trace.initial_observation),
         "final_observation": _observation_to_dict(trace.final_observation),
         "steps": [

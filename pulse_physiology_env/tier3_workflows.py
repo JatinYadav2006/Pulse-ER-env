@@ -8,10 +8,36 @@ mock and real Pulse runtimes.
 
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from .episode_runner import EpisodeTrace
 from .models import PulsePhysiologyObservation
+
+
+class DeteriorationStatus(str, Enum):
+    """Clinical status buckets used for judge-facing Tier 3 reasoning."""
+
+    STABLE = "stable"
+    MONITORING = "monitoring"
+    DETERIORATING = "deteriorating"
+    CRITICAL = "critical"
+
+
+MINOR_ALERTS = {"tachycardia", "tachypnea"}
+MAJOR_ALERTS = {"hypotension", "hypoxemia", "blood_loss", "cardiovascular_collapse"}
+MAJOR_VITALS = (
+    "mean_arterial_pressure_mmhg",
+    "spo2",
+    "heart_rate_bpm",
+    "respiration_rate_bpm",
+)
+CRITICAL_ACCELERATION_VITALS = (
+    "mean_arterial_pressure_mmhg",
+    "spo2",
+    "heart_rate_bpm",
+)
 
 
 def _mental_status_value(mental_status) -> str:
@@ -48,6 +74,189 @@ def _priority_reasons(observation: PulsePhysiologyObservation) -> list[str]:
     return reasons
 
 
+def _mean_arterial_pressure(observation: PulsePhysiologyObservation) -> float | None:
+    """Return MAP directly or derive it from systolic and diastolic pressure."""
+
+    if observation.mean_arterial_pressure_mmhg is not None:
+        return observation.mean_arterial_pressure_mmhg
+    if observation.systolic_bp_mmhg is None or observation.diastolic_bp_mmhg is None:
+        return None
+    return (observation.systolic_bp_mmhg + (2 * observation.diastolic_bp_mmhg)) / 3
+
+
+def _vital_value(observation: PulsePhysiologyObservation, vital_name: str) -> float | None:
+    """Resolve one vital from an observation, including derived MAP support."""
+
+    if vital_name == "mean_arterial_pressure_mmhg":
+        return _mean_arterial_pressure(observation)
+    return getattr(observation, vital_name, None)
+
+
+def _vital_deviation(vital_name: str, value: float | None) -> float:
+    """Measure how far a vital has drifted from its safe range for trend scoring."""
+
+    if value is None:
+        return 0.0
+
+    if vital_name == "mean_arterial_pressure_mmhg":
+        return max(0.0, 65.0 - value)
+    if vital_name == "spo2":
+        return max(0.0, 0.94 - value)
+    if vital_name == "heart_rate_bpm":
+        if 60.0 <= value <= 100.0:
+            return 0.0
+        return min(abs(value - 60.0), abs(value - 100.0))
+    if vital_name == "respiration_rate_bpm":
+        if 12.0 <= value <= 20.0:
+            return 0.0
+        return min(abs(value - 12.0), abs(value - 20.0))
+    return 0.0
+
+
+def _trend_tolerance(vital_name: str) -> float:
+    """Return the minimum meaningful drift for one vital trend calculation."""
+
+    if vital_name == "mean_arterial_pressure_mmhg":
+        return 3.0
+    if vital_name == "spo2":
+        return 0.02
+    if vital_name == "heart_rate_bpm":
+        return 5.0
+    if vital_name == "respiration_rate_bpm":
+        return 2.0
+    return 0.0
+
+
+def _recent_observations(
+    observation: PulsePhysiologyObservation,
+    previous_observation: PulsePhysiologyObservation | None = None,
+    observations: list[PulsePhysiologyObservation] | None = None,
+    *,
+    window: int = 3,
+) -> list[PulsePhysiologyObservation]:
+    """Assemble the most recent observation window for trend-aware Tier 3 logic."""
+
+    recent: list[PulsePhysiologyObservation] = []
+    if observations:
+        recent.extend(observations)
+    elif previous_observation is not None:
+        recent.extend([previous_observation, observation])
+    else:
+        recent.append(observation)
+
+    if not recent or recent[-1] != observation:
+        recent.append(observation)
+    return recent[-window:]
+
+
+def get_trend(
+    vital_name: str,
+    observations: list[PulsePhysiologyObservation],
+    window: int = 3,
+) -> str:
+    """Classify a vital as improving, stable, or worsening over recent observations."""
+
+    recent = observations[-window:]
+    deviations = [
+        _vital_deviation(vital_name, _vital_value(observation, vital_name))
+        for observation in recent
+    ]
+    if len(deviations) < 2:
+        return "stable"
+
+    delta = deviations[-1] - deviations[0]
+    tolerance = _trend_tolerance(vital_name)
+    if delta > tolerance:
+        return "worsening"
+    if delta < -tolerance:
+        return "improving"
+    return "stable"
+
+
+def _is_accelerating(vital_name: str, observations: list[PulsePhysiologyObservation]) -> bool:
+    """Detect acceleration when a vital drifts farther out of range step over step."""
+
+    recent = observations[-3:]
+    if len(recent) < 3:
+        return False
+
+    deviations = [
+        _vital_deviation(vital_name, _vital_value(observation, vital_name))
+        for observation in recent
+    ]
+    first_delta = deviations[1] - deviations[0]
+    second_delta = deviations[2] - deviations[1]
+    tolerance = _trend_tolerance(vital_name)
+    return (
+        first_delta > 0
+        and second_delta > first_delta
+        and second_delta > (tolerance / 2)
+        and deviations[-1] > (2 * tolerance)
+    )
+
+
+def _hard_threshold_reason(observation: PulsePhysiologyObservation) -> str | None:
+    """Return the first critical threshold breach, if one is present."""
+
+    map_value = _mean_arterial_pressure(observation)
+    if map_value is not None and map_value < 50.0:
+        return "MAP is below 50 mmHg, indicating critical perfusion failure."
+    if observation.spo2 is not None and observation.spo2 < 0.85:
+        return "SpO2 is below 85%, indicating critical hypoxemia."
+    if observation.heart_rate_bpm is not None and observation.heart_rate_bpm > 150.0:
+        return "Heart rate is above 150 bpm, indicating critical cardiovascular stress."
+    if observation.heart_rate_bpm is not None and observation.heart_rate_bpm < 40.0:
+        return "Heart rate is below 40 bpm, indicating critical bradycardia."
+    return None
+
+
+def _classify_deterioration_status(
+    observation: PulsePhysiologyObservation,
+    recent_observations: list[PulsePhysiologyObservation],
+) -> tuple[DeteriorationStatus, str, dict[str, str]]:
+    """Classify status from alert severity and recent vital trends."""
+
+    alerts = set(observation.active_alerts)
+    trend_map = {
+        vital_name: get_trend(vital_name, recent_observations)
+        for vital_name in MAJOR_VITALS
+    }
+
+    hard_threshold_reason = _hard_threshold_reason(observation)
+    if hard_threshold_reason is not None:
+        return DeteriorationStatus.CRITICAL, hard_threshold_reason, trend_map
+
+    if any(_is_accelerating(vital_name, recent_observations) for vital_name in CRITICAL_ACCELERATION_VITALS):
+        return (
+            DeteriorationStatus.CRITICAL,
+            "At least one major vital is accelerating away from the safe range.",
+            trend_map,
+        )
+
+    worsening_major_vitals = [
+        vital_name
+        for vital_name, trend in trend_map.items()
+        if vital_name in {"mean_arterial_pressure_mmhg", "spo2", "heart_rate_bpm"} and trend == "worsening"
+    ]
+    minor_alert_count = len(alerts & MINOR_ALERTS)
+
+    if not alerts and all(trend != "worsening" for trend in trend_map.values()):
+        return DeteriorationStatus.STABLE, "No active alerts and no worsening vital trends are present.", trend_map
+
+    if worsening_major_vitals or minor_alert_count >= 2:
+        return (
+            DeteriorationStatus.DETERIORATING,
+            "A major vital is trending the wrong way or multiple minor alerts are accumulating.",
+            trend_map,
+        )
+
+    return (
+        DeteriorationStatus.MONITORING,
+        "Only minor or non-progressive abnormalities are present, so close monitoring is appropriate.",
+        trend_map,
+    )
+
+
 class NextStepRecommendation(BaseModel):
     """Tier 3 recommendation for the next best action."""
 
@@ -81,6 +290,7 @@ class DeteriorationExplanation(BaseModel):
 
     scenario_id: str
     status: str
+    cascade_risk: str
     primary_driver: str
     supporting_findings: list[str]
     recommended_response: str
@@ -218,10 +428,19 @@ def build_triage_summary(observation: PulsePhysiologyObservation) -> TriageSumma
 def explain_deterioration(
     observation: PulsePhysiologyObservation,
     previous_observation: PulsePhysiologyObservation | None = None,
+    observations: list[PulsePhysiologyObservation] | None = None,
 ) -> DeteriorationExplanation:
     """Explain the likely deterioration driver or current stability."""
 
+    recent_observations = _recent_observations(
+        observation,
+        previous_observation,
+        observations,
+        window=3,
+    )
     alerts = set(observation.active_alerts)
+    status, status_reason, trend_map = _classify_deterioration_status(observation, recent_observations)
+
     if "blood_loss" in alerts:
         primary_driver = "hemorrhagic shock physiology"
         response = "Control bleeding and support perfusion with fluids before reassessing."
@@ -242,23 +461,32 @@ def explain_deterioration(
         response = "Continue reassessment and controlled monitoring over time."
 
     supporting_findings = _priority_reasons(observation)
-    if previous_observation is not None:
-        if (
-            previous_observation.spo2 is not None
-            and observation.spo2 is not None
-            and observation.spo2 < previous_observation.spo2
-        ):
-            supporting_findings.append("Oxygenation is falling over time.")
-        if (
-            previous_observation.systolic_bp_mmhg is not None
-            and observation.systolic_bp_mmhg is not None
-            and observation.systolic_bp_mmhg < previous_observation.systolic_bp_mmhg
-        ):
-            supporting_findings.append("Systolic pressure is trending down.")
+    supporting_findings.append(status_reason)
+    if trend_map["spo2"] == "worsening":
+        supporting_findings.append("Oxygenation is worsening over the recent observation window.")
+    elif trend_map["spo2"] == "improving":
+        supporting_findings.append("Oxygenation is improving over the recent observation window.")
+
+    if trend_map["mean_arterial_pressure_mmhg"] == "worsening":
+        supporting_findings.append("Perfusion is worsening based on the recent MAP trend.")
+    elif trend_map["mean_arterial_pressure_mmhg"] == "improving":
+        supporting_findings.append("Perfusion is improving based on the recent MAP trend.")
+
+    if trend_map["heart_rate_bpm"] == "worsening":
+        supporting_findings.append("Heart rate is drifting farther from the safe range.")
+    if trend_map["respiration_rate_bpm"] == "worsening":
+        supporting_findings.append("Respiratory rate is moving in the wrong direction.")
+
+    cascade_risk = "low"
+    if status == DeteriorationStatus.DETERIORATING:
+        cascade_risk = "medium"
+    elif status == DeteriorationStatus.CRITICAL:
+        cascade_risk = "imminent"
 
     return DeteriorationExplanation(
         scenario_id=observation.scenario_id,
-        status="deteriorating" if observation.active_alerts else "stable",
+        status=status.value,
+        cascade_risk=cascade_risk,
         primary_driver=primary_driver,
         supporting_findings=supporting_findings,
         recommended_response=response,

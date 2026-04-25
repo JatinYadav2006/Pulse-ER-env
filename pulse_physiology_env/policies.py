@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol
 from .models import EnvironmentResponse, PulsePhysiologyObservation, ToolAction
 from .prompt_builder import build_policy_prompt
 from .server.mock_scenarios import MOCK_SCENARIOS
+from .tool_availability import ToolAvailabilityError, validate_tool_availability
 from .tool_parser import ToolParseError, parse_tool_action
 
 
@@ -19,6 +20,12 @@ def action(tool_name: str, **arguments) -> ToolAction:
     """Small helper for compact action construction."""
 
     return ToolAction(tool_name=tool_name, arguments=arguments)
+
+
+def _validated_available_tools(observation: PulsePhysiologyObservation) -> list[str]:
+    """Validate backend-exposed tools before any policy consumes them."""
+
+    return validate_tool_availability(observation.available_tools)
 
 
 EXPERT_PLAYBOOKS: dict[str, tuple[ToolAction, ...]] = {
@@ -194,21 +201,31 @@ class LLMPolicy:
         self._recent_history = []
 
     def select_action(self, observation: PulsePhysiologyObservation) -> ToolAction:
+        available_tools = _validated_available_tools(observation)
         prompt = build_policy_prompt(
             observation,
-            available_tools=observation.available_tools,
+            available_tools=available_tools,
             objective=self.objective,
             recent_history=self._recent_history,
         )
-        allowed_tools = observation.available_tools or None
         try:
             raw_response = self.infer_fn(prompt)
-            parsed_action = parse_tool_action(raw_response, allowed_tools=allowed_tools)
+            parsed_action = parse_tool_action(raw_response, allowed_tools=available_tools)
+        except ToolAvailabilityError:
+            raise
         except ToolParseError as exc:
-            return self._fallback_action(observation, f"Model output parse failed: {exc}")
+            return self._fallback_action(
+                available_tools,
+                observation,
+                f"Model output parse failed: {exc}",
+            )
         except Exception as exc:  # pragma: no cover - defensive runtime guard
-            return self._fallback_action(observation, f"Model inference failed: {exc}")
-        return self._apply_repeat_guard(parsed_action, observation)
+            return self._fallback_action(
+                available_tools,
+                observation,
+                f"Model inference failed: {exc}",
+            )
+        return self._apply_repeat_guard(parsed_action, available_tools)
 
     def observe_outcome(self, action: ToolAction, result: EnvironmentResponse) -> None:
         mental_status = getattr(result.observation.mental_status, "value", result.observation.mental_status)
@@ -226,25 +243,26 @@ class LLMPolicy:
 
     def _fallback_action(
         self,
+        available_tools: list[str],
         observation: PulsePhysiologyObservation,
         reason: str,
     ) -> ToolAction:
-        available_tools = set(observation.available_tools or [])
-        if observation.active_alerts and "check_deterioration" in available_tools:
+        available_tool_set = set(available_tools)
+        if observation.active_alerts and "check_deterioration" in available_tool_set:
             candidate = action("check_deterioration", reasoning=reason)
-        elif "advance_time" in available_tools:
+        elif "advance_time" in available_tool_set:
             candidate = action("advance_time", seconds=self.fallback_seconds, reasoning=reason)
-        elif available_tools:
-            fallback_tool = sorted(available_tools)[0]
+        elif available_tool_set:
+            fallback_tool = sorted(available_tool_set)[0]
             candidate = action(fallback_tool, reasoning=reason)
         else:
-            candidate = action("advance_time", seconds=self.fallback_seconds, reasoning=reason)
-        return self._apply_repeat_guard(candidate, observation)
+            raise ToolAvailabilityError("available_tools validation failed before fallback action selection.")
+        return self._apply_repeat_guard(candidate, available_tools)
 
     def _apply_repeat_guard(
         self,
         parsed_action: ToolAction,
-        observation: PulsePhysiologyObservation,
+        available_tools: list[str],
     ) -> ToolAction:
         if self.anti_repeat_window <= 0 or len(self._recent_history) < self.anti_repeat_window:
             return parsed_action
@@ -255,8 +273,8 @@ class LLMPolicy:
         ]
 
         if all(tool_name == parsed_action.tool_name for tool_name in recent_tool_names):
-            available_tools = set(observation.available_tools or [])
-            if parsed_action.tool_name in READ_ONLY_TOOLS and "advance_time" in available_tools:
+            available_tool_set = set(available_tools)
+            if parsed_action.tool_name in READ_ONLY_TOOLS and "advance_time" in available_tool_set:
                 return action(
                     "advance_time",
                     seconds=self.fallback_seconds,
@@ -265,7 +283,7 @@ class LLMPolicy:
                         "advance time to generate a fresh signal."
                     ),
                 )
-            if parsed_action.tool_name == "advance_time" and "check_deterioration" in available_tools:
+            if parsed_action.tool_name == "advance_time" and "check_deterioration" in available_tool_set:
                 return action(
                     "check_deterioration",
                     reasoning=(

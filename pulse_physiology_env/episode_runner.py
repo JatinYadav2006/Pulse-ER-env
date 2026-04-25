@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+from enum import Enum
 
 from .models import EnvironmentResponse, PulsePhysiologyObservation, ToolAction
 from .policies import Policy
 from .server.adapters import PatientBackend
+from .tool_availability import ToolAvailabilityError, validate_tool_availability
+
+
+class EpisodeTerminationReason(str, Enum):
+    """Why an episode stopped from the consumer-side runner's perspective."""
+
+    PATIENT_DEATH = "patient_death"
+    MAX_TIMESTEPS = "max_timesteps"
+    FATAL_BACKEND_ERROR = "fatal_backend_error"
+    BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 @dataclass(frozen=True)
@@ -32,6 +44,9 @@ class EpisodeTrace:
     steps: tuple[EpisodeStep, ...]
     total_reward: float
     final_observation: PulsePhysiologyObservation
+    termination_reason: EpisodeTerminationReason
+    action_budget_remaining: int | None = None
+    events: tuple[str, ...] = ()
 
     @property
     def num_steps(self) -> int:
@@ -49,6 +64,8 @@ class EpisodeTrace:
             "num_steps": self.num_steps,
             "total_reward": round(self.total_reward, 3),
             "done": self.final_observation.done,
+            "termination_reason": self.termination_reason.value,
+            "action_budget_remaining": self.action_budget_remaining,
             "sim_time_s": self.final_observation.sim_time_s,
             "heart_rate_bpm": self.final_observation.heart_rate_bpm,
             "systolic_bp_mmhg": self.final_observation.systolic_bp_mmhg,
@@ -67,6 +84,9 @@ class EpisodeRunner:
 
     backend: PatientBackend
     max_steps: int = 8
+    action_budget: int | None = None
+    max_retry_attempts: int = 3
+    retry_backoff_s: float = 0.01
 
     def run(self, policy: Policy, scenario_id: str) -> EpisodeTrace:
         """Execute one episode and capture its trajectory."""
@@ -77,13 +97,33 @@ class EpisodeRunner:
         current_observation = reset_result.observation
         total_reward = reset_result.reward
         steps: list[EpisodeStep] = []
+        events: list[str] = []
+        remaining_action_budget = self.action_budget
+        termination_reason = EpisodeTerminationReason.MAX_TIMESTEPS
+
+        if current_observation.done:
+            termination_reason = EpisodeTerminationReason.PATIENT_DEATH
 
         for step_index in range(self.max_steps):
+            if remaining_action_budget is not None and remaining_action_budget <= 0:
+                events.append("Action budget exhausted before the next decision could be made.")
+                termination_reason = EpisodeTerminationReason.BUDGET_EXHAUSTED
+                break
             if current_observation.done:
+                termination_reason = EpisodeTerminationReason.PATIENT_DEATH
                 break
 
-            action = policy.select_action(current_observation)
-            result = self.backend.step(action)
+            try:
+                validate_tool_availability(current_observation.available_tools)
+                action = policy.select_action(current_observation)
+            except ToolAvailabilityError as exc:
+                events.append(f"Fatal backend error: {exc}")
+                termination_reason = EpisodeTerminationReason.FATAL_BACKEND_ERROR
+                break
+
+            result = self._step_with_retry(action, events)
+            if remaining_action_budget is not None:
+                remaining_action_budget -= 1
             total_reward += result.reward
             observe_outcome = getattr(policy, "observe_outcome", None)
             if callable(observe_outcome):
@@ -92,8 +132,24 @@ class EpisodeRunner:
             steps.append(self._to_step(step_index, action, result))
             current_observation = result.observation
 
-            if result.done or result.error is not None:
+            if result.done:
+                termination_reason = EpisodeTerminationReason.PATIENT_DEATH
                 break
+
+            if result.error is not None:
+                if result.error.retryable:
+                    events.append(
+                        f"Retryable error persisted for {action.tool_name}; action skipped after "
+                        f"{self.max_retry_attempts} attempts."
+                    )
+                    continue
+                events.append(
+                    f"Fatal backend error from {action.tool_name}: {result.error.code} - {result.error.message}"
+                )
+                termination_reason = EpisodeTerminationReason.FATAL_BACKEND_ERROR
+                break
+        else:
+            termination_reason = EpisodeTerminationReason.MAX_TIMESTEPS
 
         return EpisodeTrace(
             scenario_id=scenario_id,
@@ -102,7 +158,33 @@ class EpisodeRunner:
             steps=tuple(steps),
             total_reward=round(total_reward, 3),
             final_observation=current_observation,
+            termination_reason=termination_reason,
+            action_budget_remaining=remaining_action_budget,
+            events=tuple(events),
         )
+
+    def _step_with_retry(
+        self,
+        action: ToolAction,
+        events: list[str],
+    ) -> EnvironmentResponse:
+        """Execute one backend step with bounded retries for transient failures."""
+
+        result: EnvironmentResponse | None = None
+        for attempt_index in range(1, self.max_retry_attempts + 1):
+            result = self.backend.step(action)
+            if result.error is None or not result.error.retryable:
+                return result
+
+            events.append(
+                f"Retryable error on {action.tool_name} attempt {attempt_index}/{self.max_retry_attempts}: "
+                f"{result.error.code} - {result.error.message}"
+            )
+            if attempt_index < self.max_retry_attempts and self.retry_backoff_s > 0:
+                time.sleep(self.retry_backoff_s)
+
+        assert result is not None
+        return result
 
     def _to_step(
         self,
