@@ -21,6 +21,8 @@ DEFAULT_PROMPT = (
     "arguments blindly; choose interventions that match the observed physiology."
 )
 
+DEFAULT_SMOKE_MODEL = "Qwen/Qwen3-0.6B"
+
 
 def pulse_reward(environments, **kwargs) -> list[float]:
     """Read per-episode reward from the TRL environment instances."""
@@ -185,7 +187,7 @@ def _write_svg_plot(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", default="mock", choices=("mock", "real"))
-    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--model", default=DEFAULT_SMOKE_MODEL)
     parser.add_argument("--env-url", default="http://127.0.0.1:8000")
     parser.add_argument("--scenario", default="polytrauma_demo")
     parser.add_argument("--output-dir", default="outputs/pulse_er_grpo")
@@ -228,6 +230,12 @@ def main() -> None:
         scenario_id=args.scenario,
         backend_kind=args.backend,
     )
+    if "qwen2.5" in args.model.lower():
+        print(
+            "Warning: Qwen2.5 chat templates are not consistently recognized by the current "
+            "TRL response-schema utility for tool-calling GRPO. Prefer a supported family such "
+            "as Qwen/Qwen3-0.6B for smoke runs."
+        )
     dataset = build_dataset(args.num_samples, args.prompt)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
