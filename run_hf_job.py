@@ -36,7 +36,7 @@ job = api.run_job(
         "HF_TOKEN": HF_TOKEN,
     },
     env={
-        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        "HF_HUB_ENABLE_HF_TRANSFER": "0",
         "TRL_EXPERIMENTAL_SILENCE": "1",
         "PULSE_ER_REPO_URL": REPO_URL,
         "PULSE_ER_REPO_REF": REPO_REF,
@@ -180,6 +180,7 @@ PY
 
 echo "Step 4: install GRPO/training dependencies from fresh repo code"
 python -m pip install --no-cache-dir -e "$WORKDIR[training]" matplotlib jmespath
+python -m pip install --no-cache-dir "git+https://github.com/huggingface/transformers.git@main"
 
 echo "Step 5: start Pulse server from latest repo code"
 python -m uvicorn pulse_physiology_env.server.app:app --host 127.0.0.1 --port 8000 >/tmp/pulse_server.log 2>&1 &

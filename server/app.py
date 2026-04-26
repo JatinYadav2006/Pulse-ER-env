@@ -29,7 +29,8 @@ Usage:
 """
 
 from pydantic import BaseModel, Field
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 try:
     import openenv.core.env_server.http_server as openenv_http_server
@@ -43,10 +44,12 @@ try:
     from ..models import PulsePhysiologyObservation, ToolAction
     from .pathology_architect import PathologyArchitect
     from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
+    from .space_dashboard import build_dashboard_html, get_dashboard_payload, get_demo_episode_payload
 except ModuleNotFoundError:
     from models import PulsePhysiologyObservation, ToolAction
     from server.pathology_architect import PathologyArchitect
     from server.pulse_physiology_env_environment import PulsePhysiologyEnvironment
+    from server.space_dashboard import build_dashboard_html, get_dashboard_payload, get_demo_episode_payload
 
 
 class PathologyGenerationRequest(BaseModel):
@@ -81,6 +84,29 @@ app = create_app(
     max_concurrent_envs=32,
 )
 _PATHOLOGY_ARCHITECT = PathologyArchitect()
+
+
+@app.middleware("http")
+async def serve_space_dashboard(request: Request, call_next):
+    """Serve the custom Space landing page at the root path."""
+
+    if request.method == "GET" and request.url.path == "/":
+        return HTMLResponse(build_dashboard_html())
+    return await call_next(request)
+
+
+@app.get("/space/api/dashboard", include_in_schema=False)
+def space_dashboard_payload(scenario_id: str | None = None) -> JSONResponse:
+    """Return the dashboard payload for lightweight client-side refreshes."""
+
+    return JSONResponse(get_dashboard_payload(scenario_id))
+
+
+@app.get("/space/api/demo", include_in_schema=False)
+def space_demo_episode(scenario_id: str | None = None) -> JSONResponse:
+    """Return the cached mock demo episode payload used by the Space UI."""
+
+    return JSONResponse(get_demo_episode_payload(scenario_id or "respiratory_distress"))
 
 
 @app.get("/pathology/library")
