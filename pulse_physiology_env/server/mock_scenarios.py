@@ -12,6 +12,7 @@ class MockScenarioDefinition:
     scenario_id: str
     description: str
     initial_state: PatientState
+    injury_severity: float
     deterioration_per_30s: dict[str, float]
     tool_effects: dict[str, dict[str, float]]
     recommended_actions: tuple[str, ...]
@@ -34,6 +35,7 @@ BASELINE_STABLE = MockScenarioDefinition(
         active_alerts=[],
         done=False,
     ),
+    injury_severity=0.2,
     deterioration_per_30s={
         "heart_rate_bpm": 0.5,
         "systolic_bp_mmhg": -0.5,
@@ -69,6 +71,7 @@ RESPIRATORY_DISTRESS = MockScenarioDefinition(
         active_alerts=["hypoxemia", "tachypnea"],
         done=False,
     ),
+    injury_severity=0.65,
     deterioration_per_30s={
         "heart_rate_bpm": 3.0,
         "systolic_bp_mmhg": -2.0,
@@ -107,6 +110,7 @@ HEMORRHAGIC_SHOCK = MockScenarioDefinition(
         active_alerts=["tachycardia", "hypotension", "blood_loss", "tachypnea"],
         done=False,
     ),
+    injury_severity=0.85,
     deterioration_per_30s={
         "heart_rate_bpm": 4.0,
         "systolic_bp_mmhg": -5.0,

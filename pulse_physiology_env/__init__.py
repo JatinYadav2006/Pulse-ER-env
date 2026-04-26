@@ -4,25 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Pulse Physiology Env Environment."""
-
-try:
-    from .client import PulsePhysiologyEnv
-except Exception:  # pragma: no cover - enables mock-side work when optional deps are unavailable
-    PulsePhysiologyEnv = None
-
-try:
-    from .real_backend import RealPulseBackend
-except Exception:  # pragma: no cover - allows consumer-side imports without runtime deps
-    RealPulseBackend = None
-
-try:
-    from .injury_stack_adversary import InjuryStackAdversary
-except ImportError:  # pragma: no cover - allows imports when real runtime deps are unavailable
-    InjuryStackAdversary = None
-    from .gym_env import PulseGymEnv
-except Exception:  # pragma: no cover - allows imports without optional gymnasium/runtime deps
-    PulseGymEnv = None
+"""Pulse Physiology Env package exports."""
 
 from .models import (
     EnvironmentResponse,
@@ -33,7 +15,6 @@ from .models import (
     ToolError,
     ToolResult,
 )
-from .tool_catalog import EXTENDED_TOOL_NAMES, INITIAL_TOOL_NAMES, KNOWN_TOOL_NAMES
 from .patient_state import (
     ArterialBloodGasResult,
     BasicMetabolicPanelResult,
@@ -43,6 +24,7 @@ from .patient_state import (
     PatientState,
     ScenarioDifficulty,
 )
+from .tool_catalog import EXTENDED_TOOL_NAMES, INITIAL_TOOL_NAMES, KNOWN_TOOL_NAMES
 
 __all__ = [
     "ArterialBloodGasResult",
@@ -50,7 +32,6 @@ __all__ = [
     "CompleteBloodCountResult",
     "EXTENDED_TOOL_NAMES",
     "EnvironmentResponse",
-    "InjuryStackAdversary",
     "INITIAL_TOOL_NAMES",
     "KNOWN_TOOL_NAMES",
     "LactateTrend",
@@ -65,9 +46,22 @@ __all__ = [
     "ToolResult",
 ]
 
-if PulsePhysiologyEnv is not None:
-    __all__.append("PulsePhysiologyEnv")
-if PulseGymEnv is not None:
-    __all__.append("PulseGymEnv")
-if RealPulseBackend is not None:
-    __all__.append("RealPulseBackend")
+
+def _optional_export(name: str, import_fn) -> None:
+    """Import an optional package-level symbol without breaking lightweight consumers."""
+
+    try:
+        globals()[name] = import_fn()
+    except Exception:  # pragma: no cover - optional runtime/training helpers may not import everywhere
+        globals()[name] = None
+    else:
+        __all__.append(name)
+
+
+_optional_export("PulsePhysiologyEnv", lambda: __import__(__name__ + ".client", fromlist=["PulsePhysiologyEnv"]).PulsePhysiologyEnv)
+_optional_export("RealPulseBackend", lambda: __import__(__name__ + ".real_backend", fromlist=["RealPulseBackend"]).RealPulseBackend)
+_optional_export(
+    "InjuryStackAdversary",
+    lambda: __import__(__name__ + ".injury_stack_adversary", fromlist=["InjuryStackAdversary"]).InjuryStackAdversary,
+)
+_optional_export("PulseGymEnv", lambda: __import__(__name__ + ".gym_env", fromlist=["PulseGymEnv"]).PulseGymEnv)

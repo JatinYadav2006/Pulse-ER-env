@@ -8,70 +8,40 @@
 
 __all__: list[str] = []
 
-try:
-    from .atls_judge import ATLSJudge
-except Exception:  # pragma: no cover - allows imports when optional deps are unavailable
-    ATLSJudge = None
-else:
-    __all__.append("ATLSJudge")
 
-try:
-    from .pathology_architect import PathologyArchitect
-except Exception:  # pragma: no cover - allows imports when optional deps are unavailable
-    PathologyArchitect = None
-else:
-    __all__.append("PathologyArchitect")
+def _optional_export(name: str, import_fn) -> None:
+    """Import an optional server-side symbol without breaking lightweight consumers."""
 
-try:
-    from .patient_monitor import PatientMonitorVisualization
-except Exception:  # pragma: no cover - allows imports when optional deps are unavailable
-    PatientMonitorVisualization = None
-else:
-    __all__.append("PatientMonitorVisualization")
+    try:
+        globals()[name] = import_fn()
+    except Exception:  # pragma: no cover - optional runtime helpers may not import everywhere
+        globals()[name] = None
+    else:
+        __all__.append(name)
 
-try:
-    from .pulse_engine_adapter import PulseEngineAdapter
-except Exception:  # pragma: no cover - allows imports when Pulse is unavailable
-    PulseEngineAdapter = None
-else:
-    __all__.append("PulseEngineAdapter")
 
-try:
-    from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
-except Exception:  # pragma: no cover - allows mock-side work without openenv installed
-    PulsePhysiologyEnvironment = None
-else:
-    __all__.append("PulsePhysiologyEnvironment")
-
-try:
-    from .reward_engine import RewardEngine
-except Exception:  # pragma: no cover - allows imports when reward engine deps are unavailable
-    RewardEngine = None
-else:
-    __all__.append("RewardEngine")
-
-try:
-    from .tools import PulseToolExecutor
-except Exception:  # pragma: no cover - depends on Pulse runtime availability
-    PulseToolExecutor = None
-else:
-    __all__.append("PulseToolExecutor")
-    from .atls_judge import ATLSJudge
-except Exception:  # pragma: no cover - optional runtime-side helper
-    ATLSJudge = None
-else:
-    __all__.append("ATLSJudge")
-
-try:
-    from .pathology_architect import PathologyArchitect
-except Exception:  # pragma: no cover - optional runtime-side helper
-    PathologyArchitect = None
-else:
-    __all__.append("PathologyArchitect")
-
-try:
-    from .patient_monitor import PatientMonitorVisualization
-except Exception:  # pragma: no cover - optional runtime-side helper
-    PatientMonitorVisualization = None
-else:
-    __all__.append("PatientMonitorVisualization")
+_optional_export("ATLSJudge", lambda: __import__(__name__ + ".atls_judge", fromlist=["ATLSJudge"]).ATLSJudge)
+_optional_export(
+    "PathologyArchitect",
+    lambda: __import__(__name__ + ".pathology_architect", fromlist=["PathologyArchitect"]).PathologyArchitect,
+)
+_optional_export(
+    "PatientMonitorVisualization",
+    lambda: __import__(__name__ + ".patient_monitor", fromlist=["PatientMonitorVisualization"]).PatientMonitorVisualization,
+)
+_optional_export(
+    "PulseEngineAdapter",
+    lambda: __import__(__name__ + ".pulse_engine_adapter", fromlist=["PulseEngineAdapter"]).PulseEngineAdapter,
+)
+_optional_export(
+    "PulsePhysiologyEnvironment",
+    lambda: __import__(
+        __name__ + ".pulse_physiology_env_environment",
+        fromlist=["PulsePhysiologyEnvironment"],
+    ).PulsePhysiologyEnvironment,
+)
+_optional_export("RewardEngine", lambda: __import__(__name__ + ".reward_engine", fromlist=["RewardEngine"]).RewardEngine)
+_optional_export(
+    "PulseToolExecutor",
+    lambda: __import__(__name__ + ".tools", fromlist=["PulseToolExecutor"]).PulseToolExecutor,
+)

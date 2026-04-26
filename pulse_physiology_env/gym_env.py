@@ -255,12 +255,22 @@ class PulseGymEnv(Env):
         max_episode_steps: int | None = None,
         invalid_action_penalty: float = INVALID_ACTION_PENALTY,
         seed: int = 0,
+        observation_noise_level: float = 0.0,
+        time_pressure_enabled: bool = False,
+        time_pressure_onset_s: float = 180.0,
+        time_pressure_escalation_per_minute: float = 0.15,
     ) -> None:
         self.backend_name = backend_name
         self.scenario_id = self._resolve_scenario(backend_name, scenario_id)
         self.max_episode_steps = self._resolve_max_episode_steps(backend_name, max_episode_steps)
         self.invalid_action_penalty = invalid_action_penalty
         self._rng = random.Random(seed)
+        self._backend_kwargs = {
+            "observation_noise_level": observation_noise_level,
+            "time_pressure_enabled": time_pressure_enabled,
+            "time_pressure_onset_s": time_pressure_onset_s,
+            "time_pressure_escalation_per_minute": time_pressure_escalation_per_minute,
+        }
 
         self._validate_scenario()
         self.backend = self._make_backend()
@@ -284,8 +294,9 @@ class PulseGymEnv(Env):
         if seed is not None:
             self._rng.seed(seed)
 
-        requested_scenario = (options or {}).get("scenario_id", self.scenario_id)
-        response = self.backend.reset(requested_scenario)
+        reset_options = dict(options or {})
+        requested_scenario = reset_options.pop("scenario_id", self.scenario_id)
+        response = self.backend.reset(requested_scenario, **reset_options)
         self._step_count = 0
         self._current_response = response
         self._current_observation = response.observation
@@ -408,9 +419,9 @@ class PulseGymEnv(Env):
         """Instantiate the requested backend while keeping mock as the default-safe path."""
 
         if self.backend_name == "mock":
-            return MockPulseAdapter(default_scenario_id=self.scenario_id)
+            return MockPulseAdapter(default_scenario_id=self.scenario_id, **self._backend_kwargs)
         if self.backend_name == "real":
-            return RealPulseBackend(default_scenario_id=self.scenario_id)
+            return RealPulseBackend(default_scenario_id=self.scenario_id, **self._backend_kwargs)
         raise ValueError(f"Unsupported backend '{self.backend_name}'.")
 
     @staticmethod

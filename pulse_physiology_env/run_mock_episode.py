@@ -35,13 +35,33 @@ def make_policy(policy_name: str, seed: int):
     raise ValueError(f"Unsupported policy '{policy_name}'")
 
 
-def make_backend(backend_name: str, scenario: str):
+def make_backend(
+    backend_name: str,
+    scenario: str,
+    *,
+    observation_noise_level: float = 0.0,
+    time_pressure_enabled: bool = False,
+    time_pressure_onset_s: float = 180.0,
+    time_pressure_escalation_per_minute: float = 0.15,
+):
     """Create the requested backend while keeping mock as the safe default."""
 
     if backend_name == "mock":
-        return MockPulseAdapter(default_scenario_id=scenario)
+        return MockPulseAdapter(
+            default_scenario_id=scenario,
+            observation_noise_level=observation_noise_level,
+            time_pressure_enabled=time_pressure_enabled,
+            time_pressure_onset_s=time_pressure_onset_s,
+            time_pressure_escalation_per_minute=time_pressure_escalation_per_minute,
+        )
     if backend_name == "real":
-        return RealPulseBackend(default_scenario_id=scenario)
+        return RealPulseBackend(
+            default_scenario_id=scenario,
+            observation_noise_level=observation_noise_level,
+            time_pressure_enabled=time_pressure_enabled,
+            time_pressure_onset_s=time_pressure_onset_s,
+            time_pressure_escalation_per_minute=time_pressure_escalation_per_minute,
+        )
     raise ValueError(f"Unsupported backend '{backend_name}'")
 
 
@@ -80,6 +100,10 @@ def main() -> None:
     parser.add_argument("--policy", default="expert", choices=("expert", "random", "no_action"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--observation-noise-level", type=float, default=0.0)
+    parser.add_argument("--time-pressure", action="store_true")
+    parser.add_argument("--time-pressure-onset-s", type=float, default=180.0)
+    parser.add_argument("--time-pressure-escalation-per-minute", type=float, default=0.15)
     parser.add_argument("--trace-json")
     parser.add_argument("--trace-jsonl")
     args = parser.parse_args()
@@ -89,7 +113,14 @@ def main() -> None:
     max_steps = resolve_max_steps(args.backend, args.max_steps)
 
     policy = make_policy(args.policy, args.seed)
-    backend = make_backend(args.backend, scenario)
+    backend = make_backend(
+        args.backend,
+        scenario,
+        observation_noise_level=args.observation_noise_level,
+        time_pressure_enabled=args.time_pressure,
+        time_pressure_onset_s=args.time_pressure_onset_s,
+        time_pressure_escalation_per_minute=args.time_pressure_escalation_per_minute,
+    )
     runner = EpisodeRunner(backend=backend, max_steps=max_steps)
 
     try:
