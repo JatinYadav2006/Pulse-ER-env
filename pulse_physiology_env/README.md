@@ -60,6 +60,7 @@ Still in progress:
 - formal swap from the mock adapter boundary to the real runtime boundary for training-facing loops
 - final alignment review between the frozen contract and the richer real runtime state
 - integration verification that mock-side consumer code continues to work cleanly against the real path
+- severity-aware adversarial evaluation on top of the new injury-stack adversary, so the breaking point is tracked as `combo + severity`, not just combo
 
 ## Tier Framing
 
@@ -128,6 +129,28 @@ The current implementation is intentionally split into two backend paths:
 
 - `MockPulseAdapter`: deterministic, testable, used for Person 2 regression and early policy work
 - Pulse-backed runtime path: implemented through `PulseEngineAdapter`, `PulseToolExecutor`, and the real OpenEnv environment
+
+## Adversarial Evaluation
+
+The real runtime now includes an injury-stack adversary in [injury_stack_adversary.py](./injury_stack_adversary.py).
+
+It generates multi-injury cases such as:
+
+- `tension_pneumothorax`
+- `hemorrhagic_shock`
+- `cardiac_tamponade`
+- `tension_pneumothorax + hemorrhagic_shock`
+- `hemorrhagic_shock + cardiac_tamponade`
+- `tension_pneumothorax + hemorrhagic_shock + cardiac_tamponade`
+
+Important current behavior:
+
+- if a generated combo would be terminal at reset, the adversary automatically backs severity down as low as `0.5` before recording the result
+- adversary outputs now expose the requested severity and the actual evaluated severity
+
+Explicit next work:
+
+- add a full severity-escalation pass so each patient's breaking point is tracked as `injury combo + severity threshold`
 
 The important design rule is:
 

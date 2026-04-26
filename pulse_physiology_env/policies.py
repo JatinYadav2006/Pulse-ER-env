@@ -30,6 +30,12 @@ REAL_TRAUMA_SCENARIOS = {
 }
 
 
+def _is_real_trauma_scenario(scenario_id: str) -> bool:
+    """Return whether a scenario should use the real trauma expert heuristics."""
+
+    return scenario_id in REAL_TRAUMA_SCENARIOS or scenario_id.startswith("generated_")
+
+
 def action(tool_name: str, **arguments) -> ToolAction:
     """Small helper for compact action construction."""
 
@@ -56,7 +62,7 @@ EXPERT_PLAYBOOKS: dict[str, tuple[ToolAction, ...]] = {
         action("airway_support"),
         action("advance_time", seconds=30),
         action("give_oxygen", flow_lpm=15),
-        action("airway_support", mode="basic"),
+        action("airway_support"),
         action("advance_time", seconds=30),
     ),
     "hemorrhagic_shock": (
@@ -214,7 +220,7 @@ class ExpertPolicy:
     def select_action(self, observation: PulsePhysiologyObservation) -> ToolAction:
         """Choose the next expert action for the current backend state."""
 
-        if self._scenario_id in REAL_TRAUMA_SCENARIOS:
+        if _is_real_trauma_scenario(self._scenario_id):
             return self._select_real_trauma_action(observation)
 
         script = self.playbooks.get(self._scenario_id, ())
@@ -257,6 +263,13 @@ class ExpertPolicy:
                     "needle_decompression",
                     side=self._suggest_needle_side(observation),
                     monitor_seconds=90,
+                )
+
+        if self._needs_pericardiocentesis(observation) and "pericardiocentesis" in available_tools:
+            if not self._recently_used("pericardiocentesis", window=2):
+                return action(
+                    "pericardiocentesis",
+                    monitor_seconds=60,
                 )
 
         bleeding_site = self._highest_flow_hemorrhage(observation)
@@ -418,6 +431,15 @@ class ExpertPolicy:
         if map_value is not None and map_value < 65:
             return True
         return observation.shock_index is not None and observation.shock_index >= 0.9
+
+    @staticmethod
+    def _needs_pericardiocentesis(observation: PulsePhysiologyObservation) -> bool:
+        """Detect tamponade physiology that warrants pericardial drainage."""
+
+        return any(
+            alert in observation.active_alerts
+            for alert in ("possible_cardiac_tamponade", "active_pericardial_effusion")
+        )
 
     @staticmethod
     def _needs_pressor_support(

@@ -20,6 +20,7 @@ from pulse_physiology_env.models import (
 )
 from pulse_physiology_env.patient_state import PatientState
 from pulse_physiology_env.real_backend import RealPulseBackend
+from pulse_physiology_env.server.pathology_architect import PathologyArchitect
 from pulse_physiology_env.server.mock_scenarios import DEFAULT_MOCK_SCENARIO_ID
 from pulse_physiology_env.tool_catalog import KNOWN_TOOL_NAMES
 from pulse_physiology_env.tool_parser import parse_tool_action
@@ -279,6 +280,33 @@ def _regression_check_argument_normalization() -> None:
     )
 
 
+def _regression_check_stacked_pathology_blueprints() -> None:
+    """Ensure generated pathology authoring supports stacked injury combos."""
+
+    architect = PathologyArchitect()
+    blueprint = architect.build_blueprint(
+        patient_id="hassan",
+        injury_types=["tension_pneumothorax", "hemorrhagic_shock", "cardiac_tamponade"],
+        severity=0.7,
+    )
+    _assert(
+        blueprint.injury_type == "polytrauma",
+        "stacked_pathology: multi-injury combos should summarize as polytrauma",
+    )
+    _assert(
+        blueprint.injury_types == ("tension_pneumothorax", "hemorrhagic_shock", "cardiac_tamponade"),
+        "stacked_pathology: injury_types should preserve the requested combo ordering",
+    )
+    action_names = [step["action"] for step in blueprint.setup_actions]
+    _assert(
+        action_names.count("set_tension_pneumothorax") == 1
+        and action_names.count("set_pericardial_effusion") == 1
+        and action_names.count("set_hemorrhage") >= 1
+        and action_names[-1] == "advance_time",
+        "stacked_pathology: combined setup actions should include each injury plus a final deterioration window",
+    )
+
+
 def main() -> None:
     """Run lightweight contract checks against a mock or real backend implementation."""
 
@@ -305,6 +333,8 @@ def main() -> None:
     print("PASS README frontmatter encoding")
     _regression_check_argument_normalization()
     print("PASS argument normalization")
+    _regression_check_stacked_pathology_blueprints()
+    print("PASS stacked pathology blueprints")
 
     reset_result = backend.reset(args.scenario)
     _check_response_shape(reset_result, "reset")

@@ -6,24 +6,28 @@
 
 """Pulse Physiology Env environment server components."""
 
-from .atls_judge import ATLSJudge
-from .pathology_architect import PathologyArchitect
-from .patient_monitor import PatientMonitorVisualization
-from .pulse_engine_adapter import PulseEngineAdapter
-from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
-from .reward_engine import RewardEngine
-from .tools import PulseToolExecutor
-
-__all__ = [
-    "ATLSJudge",
-    "PathologyArchitect",
-    "PatientMonitorVisualization",
-    "PulseEngineAdapter",
-    "PulsePhysiologyEnvironment",
-    "PulseToolExecutor",
-    "RewardEngine",
-]
 __all__: list[str] = []
+
+try:
+    from .atls_judge import ATLSJudge
+except Exception:  # pragma: no cover - allows imports when optional deps are unavailable
+    ATLSJudge = None
+else:
+    __all__.append("ATLSJudge")
+
+try:
+    from .pathology_architect import PathologyArchitect
+except Exception:  # pragma: no cover - allows imports when optional deps are unavailable
+    PathologyArchitect = None
+else:
+    __all__.append("PathologyArchitect")
+
+try:
+    from .patient_monitor import PatientMonitorVisualization
+except Exception:  # pragma: no cover - allows imports when optional deps are unavailable
+    PatientMonitorVisualization = None
+else:
+    __all__.append("PatientMonitorVisualization")
 
 try:
     from .pulse_engine_adapter import PulseEngineAdapter
@@ -31,13 +35,6 @@ except Exception:  # pragma: no cover - allows imports when Pulse is unavailable
     PulseEngineAdapter = None
 else:
     __all__.append("PulseEngineAdapter")
-
-try:
-    from .tools import PulseToolExecutor
-except Exception:  # pragma: no cover - depends on Pulse runtime availability
-    PulseToolExecutor = None
-else:
-    __all__.append("PulseToolExecutor")
 
 try:
     from .pulse_physiology_env_environment import PulsePhysiologyEnvironment
@@ -52,3 +49,10 @@ except Exception:  # pragma: no cover - allows imports when reward engine deps a
     RewardEngine = None
 else:
     __all__.append("RewardEngine")
+
+try:
+    from .tools import PulseToolExecutor
+except Exception:  # pragma: no cover - depends on Pulse runtime availability
+    PulseToolExecutor = None
+else:
+    __all__.append("PulseToolExecutor")

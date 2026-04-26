@@ -124,8 +124,8 @@ def heuristic_infer_fn(prompt: str) -> str:
         reasoning = "Low oxygen saturation should be treated with oxygen support first."
     elif "tachypnea" in alerts and "airway_support" in available_tools and last_tool != "airway_support":
         tool_name = "airway_support"
-        arguments = {"mode": "basic"}
-        reasoning = "Persistently high respiratory effort suggests the need for airway support."
+        arguments = {}
+        reasoning = "Persistently high respiratory effort suggests escalation to the safest airway support for the current physiology."
     elif "tachypnea" in alerts and "position_patient" in available_tools and last_tool != "position_patient":
         tool_name = "position_patient"
         arguments = {"position": "upright"}

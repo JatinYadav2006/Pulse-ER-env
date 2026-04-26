@@ -53,7 +53,8 @@ class PathologyGenerationRequest(BaseModel):
     """Request model for generated trauma cases."""
 
     patient_id: str = Field(..., description="Known baseline patient identifier.")
-    injury_type: str = Field(..., description="One of the supported generated injury types.")
+    injury_type: str | None = Field(default=None, description="One supported injury type or polytrauma shorthand.")
+    injury_types: list[str] | None = Field(default=None, description="Optional stacked injury list for combo generation.")
     severity: float = Field(..., ge=0.0, le=1.0, description="Severity on a 0-1 scale.")
 
 
@@ -89,6 +90,7 @@ def pathology_library() -> dict[str, list[str]]:
     return {
         "patients": _PATHOLOGY_ARCHITECT.supported_patients(),
         "injury_types": _PATHOLOGY_ARCHITECT.supported_injury_types(),
+        "default_injury_combos": _PATHOLOGY_ARCHITECT.default_injury_combos(),
     }
 
 
@@ -100,6 +102,7 @@ def generate_pathology(request: PathologyGenerationRequest) -> dict[str, object]
         blueprint = _PATHOLOGY_ARCHITECT.build_blueprint(
             patient_id=request.patient_id,
             injury_type=request.injury_type,
+            injury_types=request.injury_types,
             severity=request.severity,
         )
     except ValueError as exc:

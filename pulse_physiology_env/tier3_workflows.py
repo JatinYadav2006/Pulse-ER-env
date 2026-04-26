@@ -423,7 +423,7 @@ def recommend_next_step(observation: PulsePhysiologyObservation) -> NextStepReco
             scenario_id=observation.scenario_id,
             risk_level=risk_level,
             recommended_tool="airway_support",
-            arguments={"mode": "basic"},
+            arguments={"mode": "auto"},
             rationale="Respiratory effort remains elevated and airway support may prevent further deterioration.",
             alternatives=[tool for tool in ("give_oxygen", "position_patient", "check_deterioration") if tool in available_tools],
         )

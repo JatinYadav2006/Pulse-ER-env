@@ -16,6 +16,11 @@ try:
 except ImportError:  # pragma: no cover - allows consumer-side imports without runtime deps
     RealPulseBackend = None
 
+try:
+    from .injury_stack_adversary import InjuryStackAdversary
+except ImportError:  # pragma: no cover - allows imports when real runtime deps are unavailable
+    InjuryStackAdversary = None
+
 from .models import (
     EnvironmentResponse,
     ObservationMetadata,
@@ -42,6 +47,7 @@ __all__ = [
     "CompleteBloodCountResult",
     "EXTENDED_TOOL_NAMES",
     "EnvironmentResponse",
+    "InjuryStackAdversary",
     "INITIAL_TOOL_NAMES",
     "KNOWN_TOOL_NAMES",
     "LactateTrend",
