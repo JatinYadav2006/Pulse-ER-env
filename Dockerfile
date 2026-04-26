@@ -3,14 +3,14 @@ FROM clashking9999/pulse-er-env:latest
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PULSE_INSTALL_DIR=/app/engine-build/install \
-    PYTHONPATH=/app
+    PYTHONPATH=/workspace
 
-WORKDIR /app
+WORKDIR /workspace
 
-COPY . /app
+COPY . /workspace
 
 RUN python -m pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e . protobuf==5.29.2
+    pip install --no-cache-dir -e /workspace protobuf==5.29.2
 
 EXPOSE 8000
 
