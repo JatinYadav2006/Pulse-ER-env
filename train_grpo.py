@@ -276,6 +276,10 @@ def main() -> None:
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--use-cpu", action="store_true")
+    parser.add_argument("--use-qlora", action="store_true")
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -293,6 +297,10 @@ def main() -> None:
             "train_grpo.py requires torch. Install the Hugging Face TRL/OpenEnv training stack first."
         ) from exc
 
+    peft_config = None
+    processing_class = None
+    model = args.model
+
     cuda_available = bool(torch.cuda.is_available())
     use_cpu = bool(args.use_cpu or not cuda_available)
     bf16_enabled = bool(cuda_available and not use_cpu and torch.cuda.is_bf16_supported())
@@ -306,6 +314,48 @@ def main() -> None:
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+
+    if args.use_qlora:
+        if use_cpu:
+            raise RuntimeError("QLoRA requires a CUDA GPU. Remove --use-cpu or run on a GPU-backed job.")
+        try:
+            from peft import LoraConfig
+            from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        except ImportError as exc:  # pragma: no cover - depends on training environment
+            raise RuntimeError(
+                "QLoRA requires `peft`, `transformers`, and `bitsandbytes`. "
+                "Install the training extras before running with --use-qlora."
+            ) from exc
+
+        compute_dtype = torch.bfloat16 if bf16_enabled else torch.float16
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            quantization_config=quantization_config,
+            device_map="auto",
+        )
+        model.config.use_cache = False
+        processing_class = AutoTokenizer.from_pretrained(args.model)
+        if processing_class.pad_token is None and processing_class.eos_token is not None:
+            processing_class.pad_token = processing_class.eos_token
+
+        peft_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules="all-linear",
+        )
+        print(
+            "Enabled QLoRA with 4-bit NF4 quantization "
+            f"(r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout})."
+        )
 
     configure_trl_env(
         env_url=args.env_url,
@@ -324,9 +374,11 @@ def main() -> None:
     environment_factory = get_environment_factory()
 
     trainer = GRPOTrainer(
-        model=args.model,
+        model=model,
         train_dataset=dataset,
         reward_funcs=pulse_reward,
+        processing_class=processing_class,
+        peft_config=peft_config,
         args=GRPOConfig(
             output_dir=args.output_dir,
             learning_rate=args.learning_rate,
@@ -358,6 +410,10 @@ def main() -> None:
             "per_device_train_batch_size": per_device_train_batch_size,
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "num_train_epochs": args.num_train_epochs,
+            "use_qlora": args.use_qlora,
+            "lora_r": args.lora_r if args.use_qlora else None,
+            "lora_alpha": args.lora_alpha if args.use_qlora else None,
+            "lora_dropout": args.lora_dropout if args.use_qlora else None,
             "use_cpu": use_cpu,
             "bf16": bf16_enabled,
             "fp16": fp16_enabled,

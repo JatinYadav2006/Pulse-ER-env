@@ -1,25 +1,37 @@
 import os
 
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, get_token
 
 
-HF_TOKEN = os.environ.get("HF_TOKEN")
+HF_TOKEN = os.environ.get("HF_TOKEN") or get_token()
 IMAGE = os.environ.get("PULSE_ER_IMAGE", "clashking9999/pulse-er-env:latest")
-ARTIFACT_REPO = os.environ.get("PULSE_ER_ARTIFACT_REPO", "clashking9999/pulse-er-grpo-artifacts")
+ARTIFACT_REPO = os.environ.get("PULSE_ER_ARTIFACT_REPO", "KChad/Pulse_ER_env")
 REPO_URL = os.environ.get("PULSE_ER_REPO_URL", "https://github.com/JatinYadav2006/Pulse-ER-env.git")
 REPO_REF = os.environ.get("PULSE_ER_REPO_REF", "kumarthegoat")
 MODEL_ID = os.environ.get("PULSE_ER_MODEL", "Qwen/Qwen3-0.6B")
 SCENARIO_ID = os.environ.get("PULSE_ER_SCENARIO", "polytrauma_demo")
+FLAVOR = os.environ.get("PULSE_ER_FLAVOR", "a10g-small")
+TIMEOUT_SECONDS = int(os.environ.get("PULSE_ER_TIMEOUT_SECONDS", str(60 * 60 * 6)))
+NUM_SAMPLES = int(os.environ.get("PULSE_ER_NUM_SAMPLES", "128"))
+NUM_GENERATIONS = int(os.environ.get("PULSE_ER_NUM_GENERATIONS", "4"))
+PER_DEVICE_TRAIN_BATCH_SIZE = int(os.environ.get("PULSE_ER_BATCH_SIZE", "8"))
+GRADIENT_ACCUMULATION_STEPS = int(os.environ.get("PULSE_ER_GRAD_ACCUM", "4"))
+NUM_TRAIN_EPOCHS = os.environ.get("PULSE_ER_NUM_TRAIN_EPOCHS", "1")
+LEARNING_RATE = os.environ.get("PULSE_ER_LEARNING_RATE", "1e-6")
+USE_QLORA = os.environ.get("PULSE_ER_USE_QLORA", "1")
+LORA_R = os.environ.get("PULSE_ER_LORA_R", "16")
+LORA_ALPHA = os.environ.get("PULSE_ER_LORA_ALPHA", "32")
+LORA_DROPOUT = os.environ.get("PULSE_ER_LORA_DROPOUT", "0.05")
 
 if not HF_TOKEN:
-    raise RuntimeError("Set HF_TOKEN in your environment before running this launcher.")
+    raise RuntimeError("Set HF_TOKEN in your environment or run `hf auth login` before running this launcher.")
 
 api = HfApi(token=HF_TOKEN)
 
 job = api.run_job(
     image=IMAGE,
-    flavor="a10g-small",
-    timeout=60 * 60 * 6,
+    flavor=FLAVOR,
+    timeout=TIMEOUT_SECONDS,
     secrets={
         "HF_TOKEN": HF_TOKEN,
     },
@@ -31,6 +43,16 @@ job = api.run_job(
         "PULSE_ER_ARTIFACT_REPO": ARTIFACT_REPO,
         "PULSE_ER_MODEL": MODEL_ID,
         "PULSE_ER_SCENARIO": SCENARIO_ID,
+        "PULSE_ER_NUM_SAMPLES": str(NUM_SAMPLES),
+        "PULSE_ER_NUM_GENERATIONS": str(NUM_GENERATIONS),
+        "PULSE_ER_BATCH_SIZE": str(PER_DEVICE_TRAIN_BATCH_SIZE),
+        "PULSE_ER_GRAD_ACCUM": str(GRADIENT_ACCUMULATION_STEPS),
+        "PULSE_ER_NUM_TRAIN_EPOCHS": str(NUM_TRAIN_EPOCHS),
+        "PULSE_ER_LEARNING_RATE": str(LEARNING_RATE),
+        "PULSE_ER_USE_QLORA": USE_QLORA,
+        "PULSE_ER_LORA_R": str(LORA_R),
+        "PULSE_ER_LORA_ALPHA": str(LORA_ALPHA),
+        "PULSE_ER_LORA_DROPOUT": str(LORA_DROPOUT),
     },
     command=[
         "bash",
@@ -187,6 +209,16 @@ PY
 
 echo "Step 7: start GRPO training"
 OUT_DIR="$WORKDIR/outputs/pulse_er_grpo_real"
+QLORA_ARGS=()
+
+if [ "$PULSE_ER_USE_QLORA" = "1" ]; then
+  QLORA_ARGS=(
+    --use-qlora
+    --lora-r "$PULSE_ER_LORA_R"
+    --lora-alpha "$PULSE_ER_LORA_ALPHA"
+    --lora-dropout "$PULSE_ER_LORA_DROPOUT"
+  )
+fi
 
 python -m pulse_physiology_env.train_grpo \
   --backend real \
@@ -194,12 +226,13 @@ python -m pulse_physiology_env.train_grpo \
   --env-url http://127.0.0.1:8000 \
   --model "$PULSE_ER_MODEL" \
   --output-dir "$OUT_DIR" \
-  --num-samples 128 \
-  --num-generations 4 \
-  --per-device-train-batch-size 8 \
-  --gradient-accumulation-steps 4 \
-  --num-train-epochs 1 \
-  --learning-rate 1e-6
+  --num-samples "$PULSE_ER_NUM_SAMPLES" \
+  --num-generations "$PULSE_ER_NUM_GENERATIONS" \
+  --per-device-train-batch-size "$PULSE_ER_BATCH_SIZE" \
+  --gradient-accumulation-steps "$PULSE_ER_GRAD_ACCUM" \
+  --num-train-epochs "$PULSE_ER_NUM_TRAIN_EPOCHS" \
+  --learning-rate "$PULSE_ER_LEARNING_RATE" \
+  "${QLORA_ARGS[@]}"
 
 echo "Step 8: convert metrics to PNG and make before/after chart"
 python - <<'PY'
@@ -299,4 +332,10 @@ echo "Job complete"
 print("JOB_ID:", job.id)
 print(f"Image: {IMAGE}")
 print(f"Repo: {REPO_URL}@{REPO_REF}")
+print(
+    "Training config: "
+    f"samples={NUM_SAMPLES}, generations={NUM_GENERATIONS}, "
+    f"batch={PER_DEVICE_TRAIN_BATCH_SIZE}, grad_accum={GRADIENT_ACCUMULATION_STEPS}, "
+    f"epochs={NUM_TRAIN_EPOCHS}, lr={LEARNING_RATE}, qlora={USE_QLORA}"
+)
 print(f"Open artifacts later at: https://huggingface.co/datasets/{ARTIFACT_REPO}")

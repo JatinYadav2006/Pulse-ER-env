@@ -37,6 +37,13 @@ training = [
     "datasets",
     "torch",
     "trl",
+    "transformers",
+    "accelerate",
+    "peft",
+    "bitsandbytes",
+    "jmespath",
+    "matplotlib",
+    "huggingface-hub<1.0",
 ]
 
 [project.scripts]
