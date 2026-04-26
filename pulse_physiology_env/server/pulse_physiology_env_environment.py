@@ -60,15 +60,24 @@ class PulsePhysiologyEnvironment(Environment):
         **kwargs: object,
     ) -> PulsePhysiologyObservation:
         """Reset the environment and initialize the requested Pulse scenario."""
-
-        blueprint = self._resolve_generated_blueprint(kwargs)
+        try:
+            blueprint = self._resolve_generated_blueprint(kwargs)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Invalid generated pathology inputs. Provide patient_id, injury_type, and severity."
+            ) from exc
         if blueprint is not None:
             self._active_blueprint = blueprint
             self._scenario = self._pathology_architect.to_scenario_definition(blueprint)
         else:
             self._active_blueprint = None
             scenario_id = kwargs.get("scenario_id")
-            self._scenario = get_scenario_definition(str(scenario_id) if scenario_id is not None else DEFAULT_SCENARIO_ID)
+            try:
+                self._scenario = get_scenario_definition(
+                    str(scenario_id) if scenario_id is not None else DEFAULT_SCENARIO_ID
+                )
+            except KeyError as exc:
+                raise ValueError(str(exc)) from exc
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
         rng = random.Random(seed)
         self._selected_patient = self._scenario.choose_patient(rng)

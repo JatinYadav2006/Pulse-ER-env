@@ -8,18 +8,21 @@
 
 try:
     from .client import PulsePhysiologyEnv
-except ImportError:  # pragma: no cover - enables mock-side work without openenv installed
+except Exception:  # pragma: no cover - enables mock-side work when optional deps are unavailable
     PulsePhysiologyEnv = None
 
 try:
     from .real_backend import RealPulseBackend
-except ImportError:  # pragma: no cover - allows consumer-side imports without runtime deps
+except Exception:  # pragma: no cover - allows consumer-side imports without runtime deps
     RealPulseBackend = None
 
 try:
     from .injury_stack_adversary import InjuryStackAdversary
 except ImportError:  # pragma: no cover - allows imports when real runtime deps are unavailable
     InjuryStackAdversary = None
+    from .gym_env import PulseGymEnv
+except Exception:  # pragma: no cover - allows imports without optional gymnasium/runtime deps
+    PulseGymEnv = None
 
 from .models import (
     EnvironmentResponse,
@@ -57,7 +60,6 @@ __all__ = [
     "ScenarioDifficulty",
     "PulsePhysiologyAction",
     "PulsePhysiologyObservation",
-    "RealPulseBackend",
     "ToolAction",
     "ToolError",
     "ToolResult",
@@ -65,3 +67,7 @@ __all__ = [
 
 if PulsePhysiologyEnv is not None:
     __all__.append("PulsePhysiologyEnv")
+if PulseGymEnv is not None:
+    __all__.append("PulseGymEnv")
+if RealPulseBackend is not None:
+    __all__.append("RealPulseBackend")

@@ -151,6 +151,20 @@ They are only a reference for the shape of separation we want:
 - informed action better than delay
 - interventions produce meaningful physiological change
 
+## Benchmark Pass Criteria (Submission-Safe)
+
+Before submission freeze, run:
+
+- `python -m pulse_physiology_env.smoke_test`
+- `python -m pulse_physiology_env.eval_mock`
+- `python -m pulse_physiology_env.integration_smoke`
+
+Expected minimum outcome:
+
+- all three commands exit successfully
+- policy ordering remains `expert > llm_demo > random > no_action`
+- no contract-shape regressions in envelope, tool_result, or error fields
+
 ## Merge Gate
 
 Do not call the real integration complete until these are true:

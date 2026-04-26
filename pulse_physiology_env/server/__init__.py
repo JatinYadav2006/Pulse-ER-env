@@ -56,3 +56,22 @@ except Exception:  # pragma: no cover - depends on Pulse runtime availability
     PulseToolExecutor = None
 else:
     __all__.append("PulseToolExecutor")
+    from .atls_judge import ATLSJudge
+except Exception:  # pragma: no cover - optional runtime-side helper
+    ATLSJudge = None
+else:
+    __all__.append("ATLSJudge")
+
+try:
+    from .pathology_architect import PathologyArchitect
+except Exception:  # pragma: no cover - optional runtime-side helper
+    PathologyArchitect = None
+else:
+    __all__.append("PathologyArchitect")
+
+try:
+    from .patient_monitor import PatientMonitorVisualization
+except Exception:  # pragma: no cover - optional runtime-side helper
+    PatientMonitorVisualization = None
+else:
+    __all__.append("PatientMonitorVisualization")
