@@ -11,7 +11,8 @@ from openenv.core.env_server.types import EnvironmentMetadata, State
 try:
     from ..models import PulsePhysiologyAction, PulsePhysiologyObservation
     from ..patient_state import PatientState
-    from ..tool_catalog import canonicalize_tool_name
+    from ..runtime_effects import NoisyObservation, TimePressureMechanic
+    from ..tool_catalog import canonicalize_tool_name, coerce_boolean_argument
     from .atls_judge import ATLSJudge
     from .pathology_architect import PathologyArchitect, PathologyBlueprint
     from .patient_monitor import PatientMonitorVisualization
@@ -22,7 +23,8 @@ try:
 except ImportError:
     from models import PulsePhysiologyAction, PulsePhysiologyObservation
     from patient_state import PatientState
-    from tool_catalog import canonicalize_tool_name
+    from runtime_effects import NoisyObservation, TimePressureMechanic
+    from tool_catalog import canonicalize_tool_name, coerce_boolean_argument
     from server.atls_judge import ATLSJudge
     from server.pathology_architect import PathologyArchitect, PathologyBlueprint
     from server.patient_monitor import PatientMonitorVisualization
@@ -37,7 +39,14 @@ class PulsePhysiologyEnvironment(Environment):
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        observation_noise_level: float = 0.0,
+        time_pressure_enabled: bool = False,
+        time_pressure_onset_s: float = 180.0,
+        time_pressure_escalation_per_minute: float = 0.15,
+    ) -> None:
         self._adapter = PulseEngineAdapter()
         self._tool_executor = PulseToolExecutor(self._adapter)
         self._reward_engine = RewardEngine()
@@ -52,6 +61,14 @@ class PulsePhysiologyEnvironment(Environment):
         self._last_reward_breakdown = RewardBreakdown()
         self._active_blueprint: PathologyBlueprint | None = None
         self._state_history: list[PatientState] = []
+        self._observed_state_history: list[PatientState] = []
+        self._observation_noise = NoisyObservation(observation_noise_level)
+        self._time_pressure = TimePressureMechanic(
+            enabled=time_pressure_enabled,
+            onset_s=time_pressure_onset_s,
+            escalation_per_minute=time_pressure_escalation_per_minute,
+        )
+        self._observation_rng = random.Random()
 
     def reset(
         self,
@@ -60,6 +77,7 @@ class PulsePhysiologyEnvironment(Environment):
         **kwargs: object,
     ) -> PulsePhysiologyObservation:
         """Reset the environment and initialize the requested Pulse scenario."""
+        self._configure_runtime_effects(kwargs)
         try:
             blueprint = self._resolve_generated_blueprint(kwargs)
         except (KeyError, TypeError, ValueError) as exc:
@@ -80,6 +98,7 @@ class PulsePhysiologyEnvironment(Environment):
                 raise ValueError(str(exc)) from exc
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
         rng = random.Random(seed)
+        self._observation_rng = random.Random(rng.random())
         self._selected_patient = self._scenario.choose_patient(rng)
 
         patient_state = self._adapter.load_patient(
@@ -101,6 +120,7 @@ class PulsePhysiologyEnvironment(Environment):
             action_budget_remaining=self._reward_tracker.action_budget_remaining,
         )
         self._state_history = [patient_state]
+        self._observed_state_history = []
         return self._build_observation(
             patient_state,
             reward=0.0,
@@ -140,6 +160,11 @@ class PulsePhysiologyEnvironment(Environment):
             action=action,
             success=execution.tool_result.success,
             had_error=execution.error is not None,
+            time_pressure_multiplier=self._time_pressure.deterioration_multiplier(
+                sim_time_s=current_state.sim_time_s,
+                injury_severity=self._current_injury_severity(),
+                unstable=self._is_state_unstable(current_state),
+            ),
         )
         reward = breakdown.total
         self._latest_patient_state = current_state
@@ -189,6 +214,9 @@ class PulsePhysiologyEnvironment(Environment):
         tool_result,
         error,
     ) -> PulsePhysiologyObservation:
+        observed_state, runtime_effect_metadata = self._observe_state(state)
+        observed_history = [*self._observed_state_history, observed_state]
+        self._observed_state_history = observed_history
         metadata = {
             "step_count": self._state.step_count,
             "scenario_description": self._scenario.description,
@@ -200,9 +228,9 @@ class PulsePhysiologyEnvironment(Environment):
             "reward_breakdown": self._last_reward_breakdown.as_metadata(),
             "available_tools": self._tool_executor.available_tools,
             "patient_monitor": self._monitor.build(
-                history=self._state_history or [state],
+                history=observed_history or [observed_state],
                 action_history=self._reward_tracker.action_history if self._reward_tracker is not None else [],
-                current_state=state,
+                current_state=observed_state,
             ).as_dict(),
             "atls_judge": self._atls_judge.evaluate(
                 state=state,
@@ -211,9 +239,10 @@ class PulsePhysiologyEnvironment(Environment):
                 state_history=self._state_history,
             ).as_dict(),
             "pathology_blueprint": self._active_blueprint.as_dict() if self._active_blueprint is not None else None,
+            **runtime_effect_metadata,
         }
         return PulsePhysiologyObservation.from_patient_state(
-            state,
+            observed_state,
             reward=reward,
             available_tools=self._tool_executor.available_tools,
             tool_result=tool_result,
@@ -293,3 +322,50 @@ class PulsePhysiologyEnvironment(Environment):
                 severity=float(kwargs["severity"]),
             )
         return None
+
+    def _configure_runtime_effects(self, kwargs: dict[str, object]) -> None:
+        observation_noise_level = float(kwargs.get("observation_noise_level", self._observation_noise.config.noise_level))
+        raw_time_pressure_enabled = kwargs.get("time_pressure_enabled", self._time_pressure.config.enabled)
+        if isinstance(raw_time_pressure_enabled, str):
+            time_pressure_enabled = coerce_boolean_argument(raw_time_pressure_enabled)
+        else:
+            time_pressure_enabled = bool(raw_time_pressure_enabled)
+        time_pressure_onset_s = float(kwargs.get("time_pressure_onset_s", self._time_pressure.config.onset_s))
+        time_pressure_escalation_per_minute = float(
+            kwargs.get(
+                "time_pressure_escalation_per_minute",
+                self._time_pressure.config.escalation_per_minute,
+            )
+        )
+        self._observation_noise = NoisyObservation(observation_noise_level)
+        self._time_pressure = TimePressureMechanic(
+            enabled=time_pressure_enabled,
+            onset_s=time_pressure_onset_s,
+            escalation_per_minute=time_pressure_escalation_per_minute,
+        )
+
+    def _observe_state(self, state: PatientState) -> tuple[PatientState, dict[str, object]]:
+        observed_state, noise_metadata = self._observation_noise.apply(
+            state,
+            rng=self._observation_rng,
+        )
+        time_pressure_metadata = self._time_pressure.as_metadata(
+            sim_time_s=state.sim_time_s,
+            injury_severity=self._current_injury_severity(),
+            unstable=self._is_state_unstable(state),
+        )
+        return observed_state, {
+            "observation_noise": noise_metadata,
+            "time_pressure": time_pressure_metadata,
+        }
+
+    def _current_injury_severity(self) -> float:
+        if self._active_blueprint is not None:
+            return float(self._active_blueprint.severity)
+        return {"easy": 0.35, "medium": 0.6, "hard": 0.85}[self._scenario.difficulty]
+
+    @staticmethod
+    def _is_state_unstable(state: PatientState) -> bool:
+        systolic = state.systolic_bp_mmhg if state.systolic_bp_mmhg is not None else 120.0
+        spo2 = state.spo2 if state.spo2 is not None else 1.0
+        return bool(state.active_alerts) or systolic < 95.0 or spo2 < 0.92 or state.mental_status != "alert"

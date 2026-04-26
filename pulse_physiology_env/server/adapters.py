@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import random
 
 from ..models import (
     INITIAL_TOOL_NAMES,
@@ -14,11 +15,13 @@ from ..models import (
     ToolError,
     ToolResult,
 )
+from ..runtime_effects import NoisyObservation, TimePressureMechanic
 from ..rewards import compute_reward
 from ..tool_catalog import (
     KNOWN_TOOL_NAMES,
     ToolValidationError,
     canonicalize_tool_name,
+    coerce_boolean_argument,
     validate_tool_arguments,
 )
 from .mock_scenarios import DEFAULT_MOCK_SCENARIO_ID, MOCK_SCENARIOS, MockScenarioDefinition
@@ -89,7 +92,7 @@ class PatientBackend(ABC):
     """Stable interface between Person 2's stack and the backend runtime."""
 
     @abstractmethod
-    def reset(self, scenario_id: str | None = None) -> EnvironmentResponse:
+    def reset(self, scenario_id: str | None = None, **kwargs: object) -> EnvironmentResponse:
         """Reset the environment and return the initial response."""
 
     @abstractmethod
@@ -104,7 +107,16 @@ class PatientBackend(ABC):
 class MockPulseAdapter(PatientBackend):
     """Deterministic backend used by Person 2 before real Pulse integration exists."""
 
-    def __init__(self, default_scenario_id: str = DEFAULT_MOCK_SCENARIO_ID):
+    def __init__(
+        self,
+        default_scenario_id: str = DEFAULT_MOCK_SCENARIO_ID,
+        *,
+        observation_noise_level: float = 0.0,
+        time_pressure_enabled: bool = False,
+        time_pressure_onset_s: float = 180.0,
+        time_pressure_escalation_per_minute: float = 0.15,
+        seed: int | None = None,
+    ):
         self._default_scenario_id = default_scenario_id
         self._scenario: MockScenarioDefinition | None = None
         self._state: PatientState | None = None
@@ -113,8 +125,16 @@ class MockPulseAdapter(PatientBackend):
         self._tool_counts: dict[str, int] = {}
         self._last_tool_name: str | None = None
         self._same_tool_called_consecutively = 0
+        self._rng = random.Random(seed)
+        self._observation_noise = NoisyObservation(observation_noise_level)
+        self._time_pressure = TimePressureMechanic(
+            enabled=time_pressure_enabled,
+            onset_s=time_pressure_onset_s,
+            escalation_per_minute=time_pressure_escalation_per_minute,
+        )
+        self._episode_observation_rng = random.Random(self._rng.random())
 
-    def reset(self, scenario_id: str | None = None) -> EnvironmentResponse:
+    def reset(self, scenario_id: str | None = None, **kwargs: object) -> EnvironmentResponse:
         selected_scenario_id = scenario_id or self._default_scenario_id
         if selected_scenario_id not in MOCK_SCENARIOS:
             valid = ", ".join(sorted(MOCK_SCENARIOS))
@@ -124,12 +144,14 @@ class MockPulseAdapter(PatientBackend):
         scenario = MOCK_SCENARIOS[selected_scenario_id]
 
         self._scenario = scenario
+        self._configure_runtime_effects(kwargs)
         self._state = self._refresh_state(scenario.initial_state.model_copy(deep=True))
         self._step_count = 0
         self._active_supports = set()
         self._tool_counts = {}
         self._last_tool_name = None
         self._same_tool_called_consecutively = 0
+        self._episode_observation_rng = random.Random(self._rng.random())
 
         return self._build_response(
             reward=0.0,
@@ -208,6 +230,7 @@ class MockPulseAdapter(PatientBackend):
             tool_usage_count=tool_usage_count,
             same_tool_called_consecutively=self._same_tool_called_consecutively,
             state_changed=bool(changed_fields),
+            time_pressure_multiplier=self._current_time_pressure_multiplier(self._state),
         ).total
 
         tool_result = result.tool_result or ToolResult(
@@ -242,9 +265,10 @@ class MockPulseAdapter(PatientBackend):
 
         scale = seconds / 30.0
         updates = self._state.model_dump()
+        deterioration_multiplier = self._current_time_pressure_multiplier(self._state)
 
         for field_name, delta in self._scenario.deterioration_per_30s.items():
-            adjusted_delta = self._deterioration_delta(field_name, delta)
+            adjusted_delta = self._deterioration_delta(field_name, delta) * deterioration_multiplier
             current_value = updates.get(field_name)
             if current_value is None:
                 continue
@@ -335,6 +359,11 @@ class MockPulseAdapter(PatientBackend):
 
         alerts = set(self._state.active_alerts)
         scale = 1.0
+        intervention_multiplier = self._time_pressure.intervention_effectiveness_multiplier(
+            sim_time_s=self._state.sim_time_s,
+            injury_severity=self._scenario.injury_severity,
+            unstable=self._is_state_unstable(self._state),
+        )
 
         if tool_name == "control_bleeding":
             if "blood_loss" in alerts:
@@ -371,7 +400,7 @@ class MockPulseAdapter(PatientBackend):
         if tool_name in self._active_supports:
             scale *= 0.7
 
-        return scale
+        return scale * intervention_multiplier
 
     def _read_only_tool(self, tool_name: str) -> EnvironmentResponse:
         assert self._state is not None
@@ -416,18 +445,22 @@ class MockPulseAdapter(PatientBackend):
     ) -> EnvironmentResponse:
         assert self._state is not None
         available_tools = self._available_tools()
+        observed_state, runtime_metadata = self._build_observed_state()
 
         return EnvironmentResponse(
             observation=PulsePhysiologyObservation.from_patient_state(
-                self._state,
+                observed_state,
                 reward=reward,
                 available_tools=available_tools,
                 tool_result=tool_result,
                 error=error,
-                metadata={"step_count": self._step_count},
+                metadata={
+                    "step_count": self._step_count,
+                    **runtime_metadata,
+                },
             ),
             reward=reward,
-            done=self._state.done,
+            done=observed_state.done,
             metadata=ObservationMetadata(
                 step_count=self._step_count,
                 available_tools=available_tools,
@@ -445,17 +478,37 @@ class MockPulseAdapter(PatientBackend):
     ) -> EnvironmentResponse:
         state = self._state or MOCK_SCENARIOS[self._default_scenario_id].initial_state
         available_tools = self._available_tools()
+        if self._state is not None:
+            observed_state, runtime_metadata = self._build_observed_state()
+        else:
+            observed_state = state
+            runtime_metadata = {
+                "observation_noise": {
+                    "enabled": self._observation_noise.config.enabled,
+                    "noise_level": round(self._observation_noise.config.normalized_level, 3),
+                    "masked_fields": [],
+                    "perturbed_fields": [],
+                },
+                "time_pressure": self._time_pressure.as_metadata(
+                    sim_time_s=float(state.sim_time_s or 0.0),
+                    injury_severity=self._scenario.injury_severity if self._scenario is not None else 0.0,
+                    unstable=self._is_state_unstable(state),
+                ),
+            }
 
         return EnvironmentResponse(
             observation=PulsePhysiologyObservation.from_patient_state(
-                state,
+                observed_state,
                 reward=-1.0,
                 available_tools=available_tools,
                 error=ToolError(code=code, message=message, retryable=retryable),
-                metadata={"step_count": self._step_count},
+                metadata={
+                    "step_count": self._step_count,
+                    **runtime_metadata,
+                },
             ),
             reward=-1.0,
-            done=state.done,
+            done=observed_state.done,
             metadata=ObservationMetadata(
                 step_count=self._step_count,
                 available_tools=available_tools,
@@ -758,3 +811,54 @@ class MockPulseAdapter(PatientBackend):
         if tool_name == "pericardiocentesis":
             return "Pericardiocentesis performed."
         return f"{tool_name} executed."
+
+    def _configure_runtime_effects(self, kwargs: dict[str, object]) -> None:
+        observation_noise_level = float(kwargs.get("observation_noise_level", self._observation_noise.config.noise_level))
+        raw_time_pressure_enabled = kwargs.get("time_pressure_enabled", self._time_pressure.config.enabled)
+        if isinstance(raw_time_pressure_enabled, str):
+            time_pressure_enabled = coerce_boolean_argument(raw_time_pressure_enabled)
+        else:
+            time_pressure_enabled = bool(raw_time_pressure_enabled)
+        time_pressure_onset_s = float(kwargs.get("time_pressure_onset_s", self._time_pressure.config.onset_s))
+        time_pressure_escalation_per_minute = float(
+            kwargs.get(
+                "time_pressure_escalation_per_minute",
+                self._time_pressure.config.escalation_per_minute,
+            )
+        )
+        self._observation_noise = NoisyObservation(observation_noise_level)
+        self._time_pressure = TimePressureMechanic(
+            enabled=time_pressure_enabled,
+            onset_s=time_pressure_onset_s,
+            escalation_per_minute=time_pressure_escalation_per_minute,
+        )
+
+    def _build_observed_state(self) -> tuple[PatientState, dict[str, object]]:
+        assert self._state is not None
+        observed_state, noise_metadata = self._observation_noise.apply(
+            self._state,
+            rng=self._episode_observation_rng,
+        )
+        time_pressure_metadata = self._time_pressure.as_metadata(
+            sim_time_s=self._state.sim_time_s,
+            injury_severity=self._scenario.injury_severity if self._scenario is not None else 0.0,
+            unstable=self._is_state_unstable(self._state),
+        )
+        return observed_state, {
+            "observation_noise": noise_metadata,
+            "time_pressure": time_pressure_metadata,
+        }
+
+    def _current_time_pressure_multiplier(self, state: PatientState) -> float:
+        assert self._scenario is not None
+        return self._time_pressure.deterioration_multiplier(
+            sim_time_s=state.sim_time_s,
+            injury_severity=self._scenario.injury_severity,
+            unstable=self._is_state_unstable(state),
+        )
+
+    @staticmethod
+    def _is_state_unstable(state: PatientState) -> bool:
+        systolic = state.systolic_bp_mmhg if state.systolic_bp_mmhg is not None else 120.0
+        spo2 = state.spo2 if state.spo2 is not None else 1.0
+        return bool(state.active_alerts) or systolic < 95.0 or spo2 < 0.92 or state.mental_status != "alert"

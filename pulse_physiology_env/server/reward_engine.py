@@ -51,6 +51,7 @@ class RewardBreakdown:
     r_intervention_safety: float = 0.0
     r_diagnostic_timeliness: float = 0.0
     r_anti_exploitation: float = 0.0
+    r_time_pressure: float = 0.0
 
     survival_bonus: float = 0.0
     time_efficiency_bonus: float = 0.0
@@ -74,6 +75,7 @@ class RewardBreakdown:
             "r_intervention_safety": self.r_intervention_safety,
             "r_diagnostic_timeliness": self.r_diagnostic_timeliness,
             "r_anti_exploitation": self.r_anti_exploitation,
+            "r_time_pressure": self.r_time_pressure,
             "survival_bonus": self.survival_bonus,
             "time_efficiency_bonus": self.time_efficiency_bonus,
             "sequence_quality_bonus": self.sequence_quality_bonus,
@@ -266,6 +268,7 @@ class RewardEngine:
         action: PulsePhysiologyAction,
         success: bool,
         had_error: bool,
+        time_pressure_multiplier: float = 1.0,
     ) -> RewardBreakdown:
         tool_name = action.tool_name.strip()
         arguments = dict(action.arguments)
@@ -285,6 +288,7 @@ class RewardEngine:
         breakdown.r_intervention_safety = self._reward_intervention_safety(tracker, before, after, tool_name, arguments)
         breakdown.r_diagnostic_timeliness = self._reward_diagnostic_timeliness(tracker, before, after, tool_name, arguments)
         breakdown.r_anti_exploitation = self._reward_anti_exploitation(tracker, after, success, had_error)
+        breakdown.r_time_pressure = self._reward_time_pressure(after, tool_name, time_pressure_multiplier)
 
         breakdown.dense_total = (
             0.35 * breakdown.r_map_stability
@@ -293,6 +297,7 @@ class RewardEngine:
             + 0.10 * breakdown.r_intervention_safety
             + 0.10 * breakdown.r_diagnostic_timeliness
             + breakdown.r_anti_exploitation
+            + breakdown.r_time_pressure
         )
 
         if after.done:
@@ -583,6 +588,20 @@ class RewardEngine:
             reward -= 0.25
 
         return reward
+
+    def _reward_time_pressure(
+        self,
+        after: PatientState,
+        tool_name: str,
+        time_pressure_multiplier: float,
+    ) -> float:
+        if time_pressure_multiplier <= 1.0 or self._is_stabilized(after):
+            return 0.0
+
+        penalty = -0.12 * (time_pressure_multiplier - 1.0)
+        if tool_name == "advance_time":
+            penalty -= 0.06 * (time_pressure_multiplier - 1.0)
+        return self._clip(penalty, -0.6, 0.0)
 
     def _time_efficiency_bonus(
         self,

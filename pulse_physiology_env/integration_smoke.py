@@ -55,9 +55,10 @@ class _ConstructorNoScenarioBackend:
 
         self.default_scenario_id = scenario_id
 
-    def reset(self, scenario_id: str | None = None):
+    def reset(self, scenario_id: str | None = None, **kwargs):
         """Proxy reset calls into a fresh mock backend instance."""
 
+        del kwargs
         from pulse_physiology_env.server.adapters import MockPulseAdapter
 
         backend = MockPulseAdapter(default_scenario_id=scenario_id or self.default_scenario_id)
@@ -307,6 +308,29 @@ def _regression_check_stacked_pathology_blueprints() -> None:
     )
 
 
+def _regression_check_runtime_effects() -> None:
+    """Ensure observation noise and time pressure can be enabled on mock resets."""
+
+    from pulse_physiology_env.server.adapters import MockPulseAdapter
+
+    backend = MockPulseAdapter(default_scenario_id="respiratory_distress")
+    reset_result = backend.reset(
+        "respiratory_distress",
+        observation_noise_level=1.0,
+        time_pressure_enabled=True,
+    )
+    observation_noise = reset_result.observation.metadata.get("observation_noise", {})
+    time_pressure = reset_result.observation.metadata.get("time_pressure", {})
+    _assert(
+        observation_noise.get("enabled") is True and observation_noise.get("noise_level", 0.0) >= 0.9,
+        "runtime_effects: observation noise metadata should be present on noisy resets",
+    )
+    _assert(
+        time_pressure.get("enabled") is True and "deterioration_multiplier" in time_pressure,
+        "runtime_effects: time pressure metadata should be present on configured resets",
+    )
+
+
 def main() -> None:
     """Run lightweight contract checks against a mock or real backend implementation."""
 
@@ -335,6 +359,8 @@ def main() -> None:
     print("PASS argument normalization")
     _regression_check_stacked_pathology_blueprints()
     print("PASS stacked pathology blueprints")
+    _regression_check_runtime_effects()
+    print("PASS runtime effects")
 
     reset_result = backend.reset(args.scenario)
     _check_response_shape(reset_result, "reset")

@@ -59,8 +59,9 @@ class PulseToolEnv:
     def reset(self, **kwargs) -> str:
         """Reset the remote environment and return the initial clinical summary."""
 
-        scenario_id = str(kwargs.get("scenario_id") or SCENARIO_ID)
-        result = self.client.reset(scenario_id=scenario_id)
+        reset_kwargs = dict(kwargs)
+        scenario_id = str(reset_kwargs.pop("scenario_id", None) or SCENARIO_ID)
+        result = self.client.reset(scenario_id=scenario_id, **reset_kwargs)
         self.reward = float(result.reward or 0.0)
         self.done = bool(result.done)
         self.last_observation = result.observation
@@ -391,8 +392,9 @@ class MockPulseToolEnv:
     def reset(self, **kwargs) -> str:
         """Reset the mock environment and return the initial clinical summary."""
 
-        scenario_id = str(kwargs.get("scenario_id") or SCENARIO_ID)
-        response = self.backend.reset(scenario_id)
+        reset_kwargs = dict(kwargs)
+        scenario_id = str(reset_kwargs.pop("scenario_id", None) or SCENARIO_ID)
+        response = self.backend.reset(scenario_id, **reset_kwargs)
         self.reward = float(response.reward or 0.0)
         self.done = bool(response.done)
         self.last_observation = response.observation

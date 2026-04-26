@@ -31,20 +31,35 @@ class RealPulseBackend(PatientBackend):
         default_scenario_id: str | None = None,
         *,
         environment_factory: Callable[[], object] | None = None,
+        observation_noise_level: float = 0.0,
+        time_pressure_enabled: bool = False,
+        time_pressure_onset_s: float = 180.0,
+        time_pressure_escalation_per_minute: float = 0.15,
     ) -> None:
         self._default_scenario_id = default_scenario_id
         self._environment = self._build_environment(environment_factory)
         self._latest_observation: PulsePhysiologyObservation | None = None
+        self._reset_defaults = {
+            "observation_noise_level": observation_noise_level,
+            "time_pressure_enabled": time_pressure_enabled,
+            "time_pressure_onset_s": time_pressure_onset_s,
+            "time_pressure_escalation_per_minute": time_pressure_escalation_per_minute,
+        }
 
-    def reset(self, scenario_id: str | None = None) -> EnvironmentResponse:
+    def reset(self, scenario_id: str | None = None, **kwargs: object) -> EnvironmentResponse:
         """Reset the real runtime and wrap its observation in the consumer envelope."""
 
         selected_scenario_id = scenario_id or self._default_scenario_id
+        reset_kwargs = {
+            **self._reset_defaults,
+            **kwargs,
+        }
         if selected_scenario_id is None:
-            observation = self._environment.reset()
+            observation = self._environment.reset(**reset_kwargs)
         else:
             observation = self._environment.reset(
-                scenario_id=self._resolve_real_scenario_id(selected_scenario_id)
+                scenario_id=self._resolve_real_scenario_id(selected_scenario_id),
+                **reset_kwargs,
             )
         return self._wrap_observation(observation)
 

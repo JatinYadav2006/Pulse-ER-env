@@ -31,6 +31,7 @@ class RewardBreakdown:
     timely_intervention_bonus: float
     anti_exploitation_penalty: float
     deterioration_penalty: float
+    time_pressure_penalty: float
     collapse_penalty: float
     total: float
 
@@ -44,6 +45,7 @@ def compute_reward(
     tool_usage_count: int = 1,
     same_tool_called_consecutively: int = 1,
     state_changed: bool = True,
+    time_pressure_multiplier: float = 1.0,
 ) -> RewardBreakdown:
     """Score one transition in a simple, readable way."""
 
@@ -73,6 +75,12 @@ def compute_reward(
     if tool_name == "advance_time" and previous_state.active_alerts:
         deterioration_penalty -= 0.2
 
+    time_pressure_penalty = 0.0
+    if time_pressure_multiplier > 1.0 and _is_unstable(new_state):
+        time_pressure_penalty -= 0.3 * (time_pressure_multiplier - 1.0)
+        if tool_name == "advance_time":
+            time_pressure_penalty -= 0.15 * (time_pressure_multiplier - 1.0)
+
     collapse_penalty = 0.0
     if new_state.done and "cardiovascular_collapse" in new_alerts:
         collapse_penalty = -5.0
@@ -86,6 +94,7 @@ def compute_reward(
         + timely_intervention_bonus
         + anti_exploitation_penalty
         + deterioration_penalty
+        + time_pressure_penalty
         + collapse_penalty,
         3,
     )
@@ -99,6 +108,13 @@ def compute_reward(
         timely_intervention_bonus=round(timely_intervention_bonus, 3),
         anti_exploitation_penalty=round(anti_exploitation_penalty, 3),
         deterioration_penalty=round(deterioration_penalty, 3),
+        time_pressure_penalty=round(time_pressure_penalty, 3),
         collapse_penalty=round(collapse_penalty, 3),
         total=total,
     )
+
+
+def _is_unstable(state: PatientState) -> bool:
+    systolic = state.systolic_bp_mmhg if state.systolic_bp_mmhg is not None else 120.0
+    spo2 = state.spo2 if state.spo2 is not None else 1.0
+    return bool(state.active_alerts) or systolic < 95.0 or spo2 < 0.92 or state.mental_status != "alert"
