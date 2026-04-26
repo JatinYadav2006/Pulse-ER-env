@@ -29,7 +29,7 @@ Usage:
 """
 
 from pydantic import BaseModel, Field
-from fastapi import HTTPException, Request
+from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
 try:
@@ -86,13 +86,11 @@ app = create_app(
 _PATHOLOGY_ARCHITECT = PathologyArchitect()
 
 
-@app.middleware("http")
-async def serve_space_dashboard(request: Request, call_next):
+@app.get("/", include_in_schema=False)
+def serve_space_dashboard() -> HTMLResponse:
     """Serve the custom Space landing page at the root path."""
 
-    if request.method == "GET" and request.url.path == "/":
-        return HTMLResponse(build_dashboard_html())
-    return await call_next(request)
+    return HTMLResponse(build_dashboard_html())
 
 
 @app.get("/space/api/dashboard", include_in_schema=False)
