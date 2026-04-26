@@ -11,6 +11,7 @@ This module supports two training modes:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .client import PulsePhysiologyEnv
@@ -56,12 +57,27 @@ class PulseToolEnv:
         self.last_observation: PulsePhysiologyObservation | None = None
         self.last_tool_result: str | None = None
 
+    @staticmethod
+    def _run_client_call(awaitable):
+        """Bridge the async OpenEnv client into TRL's sync environment API."""
+
+        try:
+            return asyncio.run(awaitable)
+        except RuntimeError as exc:
+            if "asyncio.run() cannot be called from a running event loop" not in str(exc):
+                raise
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(awaitable)
+            finally:
+                loop.close()
+
     def reset(self, **kwargs) -> str:
         """Reset the remote environment and return the initial clinical summary."""
 
         reset_kwargs = dict(kwargs)
         scenario_id = str(reset_kwargs.pop("scenario_id", None) or SCENARIO_ID)
-        result = self.client.reset(scenario_id=scenario_id, **reset_kwargs)
+        result = self._run_client_call(self.client.reset(scenario_id=scenario_id, **reset_kwargs))
         self.reward = float(result.reward or 0.0)
         self.done = bool(result.done)
         self.last_observation = result.observation
@@ -333,7 +349,7 @@ class PulseToolEnv:
             raise ValueError("Game over.")
 
         action = PulsePhysiologyAction(tool_name=tool_name, arguments=arguments)
-        result = self.client.step(action)
+        result = self._run_client_call(self.client.step(action))
         self.reward = float(result.reward or 0.0)
         self.done = bool(result.done)
         self.last_observation = result.observation
