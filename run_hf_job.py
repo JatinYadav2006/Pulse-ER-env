@@ -55,53 +55,105 @@ from pathlib import Path
 path = Path("/workspace/Pulse-ER-env/trl_env.py")
 text = path.read_text(encoding="utf-8")
 
-if "_run_client_call" not in text:
+if "self._loop = asyncio.new_event_loop()" not in text:
     if "import asyncio" not in text:
         text = text.replace(
             "from __future__ import annotations\n\n",
             "from __future__ import annotations\n\nimport asyncio\n\n",
             1,
         )
+    if "import threading" not in text:
+        text = text.replace("import asyncio\n", "import asyncio\nimport threading\n", 1)
 
-    marker = (
+    constructor_marker = (
         "        self.reward = 0.0\n"
         "        self.done = False\n"
         "        self.last_observation: PulsePhysiologyObservation | None = None\n"
         "        self.last_tool_result: str | None = None\n"
     )
-    helper = (
-        marker
+    constructor_replacement = (
+        constructor_marker
+        + "        self._loop = asyncio.new_event_loop()\n"
+        + "        self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)\n"
+        + "        self._loop_thread.start()\n"
+    )
+    text = text.replace(constructor_marker, constructor_replacement, 1)
+
+    helper_block = (
+        "    def _run_loop(self) -> None:\n"
+        + "        # Own a dedicated event loop for the lifetime of this environment.\n"
         + "\n"
-        + "    @staticmethod\n"
-        + "    def _run_client_call(awaitable):\n"
+        + "        asyncio.set_event_loop(self._loop)\n"
+        + "        self._loop.run_forever()\n"
+        + "\n"
+        + "    async def _call_client_async(self, method_name: str, *args, **kwargs):\n"
+        + "        # Execute one async client call on the dedicated event loop.\n"
+        + "\n"
+        + "        method = getattr(self.client, method_name)\n"
+        + "        return await method(*args, **kwargs)\n"
+        + "\n"
+        + "    def _run_client_call(self, method_name: str, *args, **kwargs):\n"
         + "        # Bridge the async OpenEnv client into the sync TRL environment API.\n"
         + "\n"
+        + "        future = asyncio.run_coroutine_threadsafe(\n"
+        + "            self._call_client_async(method_name, *args, **kwargs),\n"
+        + "            self._loop,\n"
+        + "        )\n"
+        + "        return future.result()\n"
+        + "\n"
+        + "    def __del__(self) -> None:\n"
+        + "        # Best-effort cleanup for the background event loop and websocket client.\n"
+        + "\n"
+        + "        loop = getattr(self, \"_loop\", None)\n"
+        + "        if loop is None or loop.is_closed():\n"
+        + "            return\n"
         + "        try:\n"
-        + "            return asyncio.run(awaitable)\n"
-        + "        except RuntimeError as exc:\n"
-        + '            if "asyncio.run() cannot be called from a running event loop" not in str(exc):\n'
-        + "                raise\n"
-        + "            loop = asyncio.new_event_loop()\n"
-        + "            try:\n"
-        + "                return loop.run_until_complete(awaitable)\n"
-        + "            finally:\n"
-        + "                loop.close()\n"
+        + "            future = asyncio.run_coroutine_threadsafe(self.client.close(), loop)\n"
+        + "            future.result(timeout=5)\n"
+        + "        except Exception:\n"
+        + "            pass\n"
+        + "        finally:\n"
+        + "            loop.call_soon_threadsafe(loop.stop)\n"
+        + "\n"
     )
-    text = text.replace(marker, helper, 1)
+
+    if "    @staticmethod\n    def _run_client_call" in text:
+        start = text.index("    @staticmethod\n    def _run_client_call")
+        end = text.index("    def reset(", start)
+        text = text[:start] + helper_block + text[end:]
+    elif "    def _run_client_call" in text:
+        start = text.index("    def _run_client_call")
+        end = text.index("    def reset(", start)
+        text = text[:start] + helper_block + text[end:]
+    else:
+        insert_at = text.index("    def reset(")
+        text = text[:insert_at] + helper_block + text[insert_at:]
+
     text = text.replace(
         "        result = self.client.reset(scenario_id=scenario_id, **reset_kwargs)\n",
+        "        result = self._run_client_call(\"reset\", scenario_id=scenario_id, **reset_kwargs)\n",
+        1,
+    )
+    text = text.replace(
         "        result = self._run_client_call(self.client.reset(scenario_id=scenario_id, **reset_kwargs))\n",
+        "        result = self._run_client_call(\"reset\", scenario_id=scenario_id, **reset_kwargs)\n",
         1,
     )
     text = text.replace(
         "        result = self.client.step(action)\n",
-        "        result = self._run_client_call(self.client.step(action))\n",
+        "        result = self._run_client_call(\"step\", action)\n",
         1,
     )
+    text = text.replace(
+        "        result = self._run_client_call(self.client.step(action))\n",
+        "        result = self._run_client_call(\"step\", action)\n",
+        1,
+    )
+
     path.write_text(text, encoding="utf-8")
-    print("Applied async client hotfix to trl_env.py")
+    print("Applied dedicated-loop OpenEnv client hotfix to trl_env.py")
 else:
-    print("trl_env.py already includes async client bridge")
+    print("trl_env.py already includes dedicated OpenEnv loop bridge")
 PY
 
 echo "Step 4: install GRPO/training dependencies from fresh repo code"

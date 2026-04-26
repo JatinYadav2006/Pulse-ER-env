@@ -12,6 +12,7 @@ This module supports two training modes:
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 from .client import PulsePhysiologyEnv
@@ -56,28 +57,51 @@ class PulseToolEnv:
         self.done = False
         self.last_observation: PulsePhysiologyObservation | None = None
         self.last_tool_result: str | None = None
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._loop_thread.start()
 
-    @staticmethod
-    def _run_client_call(awaitable):
+    def _run_loop(self) -> None:
+        """Own a dedicated event loop for the lifetime of this environment."""
+
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    async def _call_client_async(self, method_name: str, *args, **kwargs):
+        """Execute one async client call on the dedicated event loop."""
+
+        method = getattr(self.client, method_name)
+        return await method(*args, **kwargs)
+
+    def _run_client_call(self, method_name: str, *args, **kwargs):
         """Bridge the async OpenEnv client into TRL's sync environment API."""
 
+        future = asyncio.run_coroutine_threadsafe(
+            self._call_client_async(method_name, *args, **kwargs),
+            self._loop,
+        )
+        return future.result()
+
+    def __del__(self) -> None:
+        """Best-effort cleanup for the background event loop and websocket client."""
+
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed():
+            return
         try:
-            return asyncio.run(awaitable)
-        except RuntimeError as exc:
-            if "asyncio.run() cannot be called from a running event loop" not in str(exc):
-                raise
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(awaitable)
-            finally:
-                loop.close()
+            future = asyncio.run_coroutine_threadsafe(self.client.close(), loop)
+            future.result(timeout=5)
+        except Exception:
+            pass
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
 
     def reset(self, **kwargs) -> str:
         """Reset the remote environment and return the initial clinical summary."""
 
         reset_kwargs = dict(kwargs)
         scenario_id = str(reset_kwargs.pop("scenario_id", None) or SCENARIO_ID)
-        result = self._run_client_call(self.client.reset(scenario_id=scenario_id, **reset_kwargs))
+        result = self._run_client_call("reset", scenario_id=scenario_id, **reset_kwargs)
         self.reward = float(result.reward or 0.0)
         self.done = bool(result.done)
         self.last_observation = result.observation
@@ -349,7 +373,7 @@ class PulseToolEnv:
             raise ValueError("Game over.")
 
         action = PulsePhysiologyAction(tool_name=tool_name, arguments=arguments)
-        result = self._run_client_call(self.client.step(action))
+        result = self._run_client_call("step", action)
         self.reward = float(result.reward or 0.0)
         self.done = bool(result.done)
         self.last_observation = result.observation
