@@ -58,7 +58,7 @@ Finally, it creates a useful evaluation surface for interpretability. Pulse-ER d
 
 ### Evidence on the Real Pulse Runtime
 
-![Pulse-ER real Pulse training run](artifacts/pulse_er_real_grpo_training_curve.png)
+![Pulse-ER real Pulse training run](C:/Users/Admin/Desktop/My projects/pulse-phisiology-env/artifacts/pulse_er_real_grpo_training_curve.png)
 
 This chart captures the most important empirical result in the project: the training curve on the real Pulse Physiology Engine in a polytrauma scenario. The orange line is the untrained baseline, which remains strongly negative because poor action sequences repeatedly allow deterioration and death. The blue line is the GRPO-trained policy, which climbs from failure into positive reward and eventually converges near the best achievable return. In other words, the agent is not merely learning to sound medical. It is learning intervention sequences that actually stabilize a simulated trauma patient under a real physiology backend.
 
@@ -315,7 +315,7 @@ The mock path lives in `server/adapters.py` and `server/mock_scenarios.py`. It p
 
 This separation keeps development practical. People can iterate without requiring a full Pulse installation, while still retaining a path to a much more realistic backend for serious evaluation.
 
-![Pulse-ER mock respiratory distress training run](artifacts/mock_before_after_respiratory_distress.png)
+![Pulse-ER mock respiratory distress training run](C:/Users/Admin/Desktop/My projects/pulse-phisiology-env/artifacts/mock_before_after_respiratory_distress.png)
 
 The mock training curve tells a different but equally useful story. In the respiratory distress scenario, the trained policy improves quickly and smoothly because the mock backend is deterministic, fast, and intentionally simplified. That makes it ideal for smoke tests, reward debugging, parser validation, and early RL iteration. The contrast between this figure and the real Pulse curve is exactly what makes the project strong: the mock environment accelerates development, while the real Pulse environment tells us whether those learned behaviors survive a harder and more physiologically grounded setting.
 
