@@ -1,9 +1,9 @@
-"""Minimal scenario authoring for generated trauma cases."""
+"""Scenario authoring for generated trauma cases and stacked-injury adversaries."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from pulse_physiology_env.patient_state import ScenarioDifficulty
 
@@ -16,7 +16,17 @@ from .scenarios import (
     ScenarioDefinition,
 )
 
+AtomicInjuryType = Literal["tension_pneumothorax", "hemorrhagic_shock", "cardiac_tamponade"]
 InjuryType = Literal["tension_pneumothorax", "hemorrhagic_shock", "cardiac_tamponade", "polytrauma"]
+
+DEFAULT_STACKED_INJURY_COMBOS: tuple[tuple[AtomicInjuryType, ...], ...] = (
+    ("tension_pneumothorax",),
+    ("hemorrhagic_shock",),
+    ("cardiac_tamponade",),
+    ("tension_pneumothorax", "hemorrhagic_shock"),
+    ("hemorrhagic_shock", "cardiac_tamponade"),
+    ("tension_pneumothorax", "hemorrhagic_shock", "cardiac_tamponade"),
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +38,7 @@ class PathologyBlueprint:
     patient_id: str
     state_file: str
     injury_type: InjuryType
+    injury_types: tuple[AtomicInjuryType, ...]
     severity: float
     difficulty: ScenarioDifficulty
     reward_profile: str
@@ -59,37 +70,43 @@ class PathologyArchitect:
 
         return ["cardiac_tamponade", "hemorrhagic_shock", "polytrauma", "tension_pneumothorax"]
 
+    @staticmethod
+    def default_injury_combos() -> list[list[str]]:
+        """Return the default stacked-injury combos used by the adversary runner."""
+
+        return [list(combo) for combo in DEFAULT_STACKED_INJURY_COMBOS]
+
     def build_blueprint(
         self,
         *,
         patient_id: str,
-        injury_type: str,
+        injury_type: str | None = None,
+        injury_types: Sequence[str] | None = None,
         severity: float,
     ) -> PathologyBlueprint:
-        """Build a generated case from a single injury type and severity value."""
+        """Build a generated case from one or more injury types and a severity value."""
 
         profile = self._resolve_patient(patient_id)
-        injury_key = injury_type.strip().lower().replace("-", "_").replace(" ", "_")
-        if injury_key not in self.supported_injury_types():
-            valid = ", ".join(self.supported_injury_types())
-            raise ValueError(f"Unsupported injury_type '{injury_type}'. Expected one of: {valid}")
-
+        combo = self._resolve_injury_combo(injury_type=injury_type, injury_types=injury_types)
         clamped_severity = max(0.0, min(1.0, float(severity)))
         difficulty = self._difficulty_from_severity(clamped_severity)
-        reward_profile = "polytrauma" if injury_key == "polytrauma" else injury_key
-        setup_actions = self._build_setup_actions(injury_key, clamped_severity)
-        scenario_id = f"generated_{injury_key}_{profile.patient_id}"
+        summary_injury = combo[0] if len(combo) == 1 else "polytrauma"
+        reward_profile = summary_injury
+        setup_actions = self._build_setup_actions(combo, clamped_severity)
+        combo_slug = "_plus_".join(combo)
+        scenario_id = f"generated_{combo_slug}_{profile.patient_id}"
+        combo_label = " + ".join(injury.replace("_", " ") for injury in combo)
         description = (
-            f"Generated {injury_key.replace('_', ' ')} case for {profile.patient_id} at severity "
-            f"{clamped_severity:.2f}."
+            f"Generated {combo_label} case for {profile.patient_id} at severity {clamped_severity:.2f}."
         )
-        max_time_s = 1800.0 if difficulty != "hard" else 2100.0
+        max_time_s = 1800.0 + (300.0 if len(combo) >= 2 else 0.0) + (300.0 if len(combo) >= 3 else 0.0)
         return PathologyBlueprint(
             scenario_id=scenario_id,
             description=description,
             patient_id=profile.patient_id,
             state_file=profile.state_file,
-            injury_type=injury_key,  # type: ignore[arg-type]
+            injury_type=summary_injury,  # type: ignore[arg-type]
+            injury_types=combo,
             severity=clamped_severity,
             difficulty=difficulty,
             reward_profile=reward_profile,
@@ -118,7 +135,7 @@ class PathologyArchitect:
                     effusion_rate_ml_per_min=float(step["effusion_rate_ml_per_min"]),
                 )
             elif action_name == "advance_time":
-                adapter.advance_time(float(step["seconds"]))
+                self._advance_setup_time(adapter, float(step["seconds"]))
             else:
                 raise ValueError(f"Unsupported setup action '{action_name}' in generated blueprint.")
 
@@ -143,6 +160,42 @@ class PathologyArchitect:
             raise ValueError(f"Unknown patient_id '{patient_id}'. Expected one of: {valid}")
         return self._PATIENTS[patient_key]
 
+    def _resolve_injury_combo(
+        self,
+        *,
+        injury_type: str | None,
+        injury_types: Sequence[str] | None,
+    ) -> tuple[AtomicInjuryType, ...]:
+        if injury_type is not None and injury_types is not None:
+            raise ValueError("Pass either injury_type or injury_types, not both.")
+        if injury_type is None and injury_types is None:
+            raise ValueError("Pass injury_type or injury_types when generating a pathology blueprint.")
+
+        raw_items: list[str]
+        if injury_types is not None:
+            if not injury_types:
+                raise ValueError("injury_types must contain at least one injury.")
+            raw_items = [str(item) for item in injury_types]
+        else:
+            raw_items = [str(injury_type)]
+
+        combo: list[AtomicInjuryType] = []
+        for raw_item in raw_items:
+            injury_key = raw_item.strip().lower().replace("-", "_").replace(" ", "_")
+            if injury_key == "polytrauma":
+                for poly_injury in ("tension_pneumothorax", "hemorrhagic_shock"):
+                    if poly_injury not in combo:
+                        combo.append(poly_injury)
+                continue
+            if injury_key not in {"tension_pneumothorax", "hemorrhagic_shock", "cardiac_tamponade"}:
+                valid = ", ".join(self.supported_injury_types())
+                raise ValueError(f"Unsupported injury type '{raw_item}'. Expected one of: {valid}")
+            typed_injury = injury_key  # type: ignore[assignment]
+            if typed_injury not in combo:
+                combo.append(typed_injury)
+
+        return tuple(combo)
+
     @staticmethod
     def _difficulty_from_severity(severity: float) -> ScenarioDifficulty:
         if severity < 0.34:
@@ -151,11 +204,38 @@ class PathologyArchitect:
             return "medium"
         return "hard"
 
-    def _build_setup_actions(self, injury_type: str, severity: float) -> list[dict[str, Any]]:
+    def _build_setup_actions(
+        self,
+        injury_types: tuple[AtomicInjuryType, ...],
+        severity: float,
+    ) -> list[dict[str, Any]]:
+        steps: list[dict[str, Any]] = []
+        combo_size = len(injury_types)
+        for injury_type in injury_types:
+            steps.extend(self._build_atomic_injury_actions(injury_type, severity, combo_size=combo_size))
+        steps.append(
+            {
+                "action": "advance_time",
+                "seconds": self._initial_deterioration_seconds(injury_types, severity, combo_size=combo_size),
+            }
+        )
+        return steps
+
+    def _build_atomic_injury_actions(
+        self,
+        injury_type: AtomicInjuryType,
+        severity: float,
+        *,
+        combo_size: int,
+    ) -> list[dict[str, Any]]:
+        combo_scale = self._combo_intensity_scale(combo_size)
         if injury_type == "tension_pneumothorax":
             return [
-                {"action": "set_tension_pneumothorax", "side": "left", "severity": round(0.30 + 0.55 * severity, 3)},
-                {"action": "advance_time", "seconds": round(45.0 + 135.0 * severity, 1)},
+                {
+                    "action": "set_tension_pneumothorax",
+                    "side": "left",
+                    "severity": round((0.30 + 0.55 * severity) * combo_scale, 3),
+                }
             ]
         if injury_type == "hemorrhagic_shock":
             steps: list[dict[str, Any]] = [
@@ -163,7 +243,7 @@ class PathologyArchitect:
                     "action": "set_hemorrhage",
                     "compartment": "right_leg",
                     "hemorrhage_type": "external",
-                    "flow_rate_ml_per_min": round(80.0 + 140.0 * severity, 1),
+                    "flow_rate_ml_per_min": round((80.0 + 140.0 * severity) * combo_scale, 1),
                 }
             ]
             if severity >= 0.45:
@@ -172,32 +252,50 @@ class PathologyArchitect:
                         "action": "set_hemorrhage",
                         "compartment": "spleen",
                         "hemorrhage_type": "internal",
-                        "flow_rate_ml_per_min": round(25.0 + 75.0 * severity, 1),
+                        "flow_rate_ml_per_min": round((25.0 + 75.0 * severity) * combo_scale, 1),
                     }
                 )
-            steps.append({"action": "advance_time", "seconds": round(60.0 + 150.0 * severity, 1)})
             return steps
-        if injury_type == "cardiac_tamponade":
-            return [
-                {
-                    "action": "set_pericardial_effusion",
-                    "effusion_rate_ml_per_min": round(35.0 + 135.0 * severity, 1),
-                },
-                {"action": "advance_time", "seconds": round(60.0 + 120.0 * severity, 1)},
-            ]
         return [
-            {"action": "set_tension_pneumothorax", "side": "left", "severity": round(0.30 + 0.50 * severity, 3)},
             {
-                "action": "set_hemorrhage",
-                "compartment": "right_leg",
-                "hemorrhage_type": "external",
-                "flow_rate_ml_per_min": round(90.0 + 120.0 * severity, 1),
-            },
-            {
-                "action": "set_hemorrhage",
-                "compartment": "spleen",
-                "hemorrhage_type": "internal",
-                "flow_rate_ml_per_min": round(20.0 + 85.0 * severity, 1),
-            },
-            {"action": "advance_time", "seconds": round(75.0 + 150.0 * severity, 1)},
+                "action": "set_pericardial_effusion",
+                "effusion_rate_ml_per_min": round((35.0 + 135.0 * severity) * combo_scale, 1),
+            }
         ]
+
+    @staticmethod
+    def _initial_deterioration_seconds(
+        injury_types: tuple[AtomicInjuryType, ...],
+        severity: float,
+        *,
+        combo_size: int,
+    ) -> float:
+        base = 45.0 + 135.0 * severity
+        if "hemorrhagic_shock" in injury_types:
+            base = max(base, 60.0 + 150.0 * severity)
+        if "cardiac_tamponade" in injury_types:
+            base = max(base, 60.0 + 120.0 * severity)
+        combo_time_scale = {1: 1.0, 2: 0.78, 3: 0.62}.get(combo_size, 0.55)
+        return round(min(240.0, base * combo_time_scale), 1)
+
+    @staticmethod
+    def _combo_intensity_scale(combo_size: int) -> float:
+        return {1: 1.0, 2: 0.84, 3: 0.72}.get(combo_size, 0.68)
+
+    @staticmethod
+    def _advance_setup_time(adapter: PulseEngineAdapter, total_seconds: float) -> None:
+        """Advance generated scenarios in smaller chunks so severe stacks reset reliably."""
+
+        remaining_seconds = max(0.0, float(total_seconds))
+        chunk_seconds = min(30.0, remaining_seconds)
+        while remaining_seconds > 0.0:
+            step_seconds = min(chunk_seconds, remaining_seconds)
+            try:
+                state = adapter.advance_time(step_seconds)
+                remaining_seconds = round(max(0.0, remaining_seconds - step_seconds), 6)
+                if state.done or "cardiac_arrest" in state.active_alerts:
+                    return
+            except RuntimeError:
+                if step_seconds <= 5.0:
+                    return
+                chunk_seconds = max(5.0, step_seconds / 2.0)

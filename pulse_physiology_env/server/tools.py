@@ -632,10 +632,12 @@ class PulseToolExecutor:
 
     def _handle_airway_support(self, arguments: dict[str, Any]) -> ToolExecution:
         previous = self._adapter.get_full_state()
-        support_type = str(
-            arguments.get("support_type") or arguments.get("mode") or self._suggest_airway_support(previous)
-        )
+        requested_support = arguments.get("support_type") or arguments.get("mode")
+        support_type = str(requested_support or self._suggest_airway_support(previous))
         support_key = support_type.strip().lower().replace("-", "_").replace(" ", "_")
+        if support_key in {"auto", "basic", "default", "standard", "support", "airway_support"}:
+            support_type = self._suggest_airway_support(previous)
+            support_key = support_type.strip().lower().replace("-", "_").replace(" ", "_")
         monitor_seconds = self._read_optional_float(arguments, keys=("monitor_seconds",)) or 60.0
         if support_key in {"bag_valve_mask", "bvm"}:
             state = self._adapter.apply_bag_valve_mask(

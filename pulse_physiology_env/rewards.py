@@ -29,6 +29,7 @@ class RewardBreakdown:
     blood_volume_delta: float
     assessment_bonus: float
     timely_intervention_bonus: float
+    anti_exploitation_penalty: float
     deterioration_penalty: float
     collapse_penalty: float
     total: float
@@ -39,6 +40,10 @@ def compute_reward(
     new_state: PatientState,
     tool_name: str,
     recommended_actions: tuple[str, ...] = (),
+    *,
+    tool_usage_count: int = 1,
+    same_tool_called_consecutively: int = 1,
+    state_changed: bool = True,
 ) -> RewardBreakdown:
     """Score one transition in a simple, readable way."""
 
@@ -50,8 +55,16 @@ def compute_reward(
     if new_state.blood_volume_ml is not None and previous_state.blood_volume_ml is not None:
         blood_volume_delta = (new_state.blood_volume_ml - previous_state.blood_volume_ml) / 250.0
 
-    assessment_bonus = 0.1 if tool_name in READ_ONLY_TOOLS else 0.0
-    timely_intervention_bonus = 0.3 if tool_name in recommended_actions else 0.0
+    assessment_bonus = 0.1 if tool_name in READ_ONLY_TOOLS and tool_usage_count == 1 else 0.0
+    timely_intervention_bonus = 0.3 if tool_name in recommended_actions and tool_usage_count == 1 else 0.0
+
+    anti_exploitation_penalty = 0.0
+    if same_tool_called_consecutively >= 2:
+        anti_exploitation_penalty -= 0.15 * (same_tool_called_consecutively - 1)
+    if tool_name in READ_ONLY_TOOLS and tool_usage_count > 1 and not state_changed:
+        anti_exploitation_penalty -= 0.05
+    if tool_name not in READ_ONLY_TOOLS and not state_changed:
+        anti_exploitation_penalty -= 0.05
 
     new_alerts = set(new_state.active_alerts)
     previous_alerts = set(previous_state.active_alerts)
@@ -71,6 +84,7 @@ def compute_reward(
         + blood_volume_delta
         + assessment_bonus
         + timely_intervention_bonus
+        + anti_exploitation_penalty
         + deterioration_penalty
         + collapse_penalty,
         3,
@@ -83,6 +97,7 @@ def compute_reward(
         blood_volume_delta=round(blood_volume_delta, 3),
         assessment_bonus=round(assessment_bonus, 3),
         timely_intervention_bonus=round(timely_intervention_bonus, 3),
+        anti_exploitation_penalty=round(anti_exploitation_penalty, 3),
         deterioration_penalty=round(deterioration_penalty, 3),
         collapse_penalty=round(collapse_penalty, 3),
         total=total,

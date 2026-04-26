@@ -224,8 +224,11 @@ class PulsePhysiologyEnvironment(Environment):
     def _resolve_generated_blueprint(self, kwargs: dict[str, object]) -> PathologyBlueprint | None:
         has_scenario_id = kwargs.get("scenario_id") is not None
         raw_blueprint = kwargs.get("pathology_blueprint")
-        required_keys = {"patient_id", "injury_type", "severity"}
-        provided_authoring_keys = {key for key in required_keys if kwargs.get(key) is not None}
+        base_keys = {"patient_id", "severity"}
+        selector_keys = {"injury_type", "injury_types"}
+        provided_base_keys = {key for key in base_keys if kwargs.get(key) is not None}
+        provided_selector_keys = {key for key in selector_keys if kwargs.get(key) is not None}
+        provided_authoring_keys = provided_base_keys | provided_selector_keys
 
         if has_scenario_id and (raw_blueprint is not None or provided_authoring_keys):
             raise ValueError(
@@ -234,32 +237,59 @@ class PulsePhysiologyEnvironment(Environment):
 
         if raw_blueprint is not None and provided_authoring_keys:
             raise ValueError(
-                "Pass either pathology_blueprint or patient_id/injury_type/severity, not both."
+                "Pass either pathology_blueprint or patient_id/injury_type(s)/severity, not both."
             )
 
         if isinstance(raw_blueprint, dict):
-            missing_keys = required_keys - set(raw_blueprint)
-            if missing_keys:
-                missing = ", ".join(sorted(missing_keys))
+            raw_base_keys = {key for key in base_keys if raw_blueprint.get(key) is not None}
+            raw_selector_keys = {key for key in selector_keys if raw_blueprint.get(key) is not None}
+            missing_base_keys = base_keys - raw_base_keys
+            if missing_base_keys:
+                missing = ", ".join(sorted(missing_base_keys))
                 raise ValueError(
                     f"pathology_blueprint is missing required keys: {missing}"
                 )
+            if not raw_selector_keys:
+                raise ValueError(
+                    "pathology_blueprint must include injury_type or injury_types."
+                )
             return self._pathology_architect.build_blueprint(
                 patient_id=str(raw_blueprint["patient_id"]),
-                injury_type=str(raw_blueprint["injury_type"]),
+                injury_type=(
+                    str(raw_blueprint["injury_type"])
+                    if raw_blueprint.get("injury_type") is not None and raw_blueprint.get("injury_types") is None
+                    else None
+                ),
+                injury_types=raw_blueprint.get("injury_types"),
                 severity=float(raw_blueprint["severity"]),
             )
 
-        if provided_authoring_keys and provided_authoring_keys != required_keys:
-            missing = ", ".join(sorted(required_keys - provided_authoring_keys))
+        if provided_authoring_keys and not provided_base_keys:
             raise ValueError(
-                f"Generated-case reset requires patient_id, injury_type, and severity together. Missing: {missing}"
+                "Generated-case reset requires patient_id and severity together with injury_type or injury_types."
             )
 
-        if required_keys.issubset(kwargs):
+        if provided_selector_keys and len(provided_selector_keys) != 1:
+            raise ValueError(
+                "Generated-case reset accepts exactly one of injury_type or injury_types."
+            )
+
+        if provided_base_keys and provided_base_keys != base_keys:
+            missing = ", ".join(sorted(base_keys - provided_base_keys))
+            raise ValueError(
+                f"Generated-case reset requires patient_id and severity together. Missing: {missing}"
+            )
+
+        if provided_base_keys == base_keys and not provided_selector_keys:
+            raise ValueError(
+                "Generated-case reset requires exactly one of injury_type or injury_types."
+            )
+
+        if provided_base_keys == base_keys and len(provided_selector_keys) == 1:
             return self._pathology_architect.build_blueprint(
                 patient_id=str(kwargs["patient_id"]),
-                injury_type=str(kwargs["injury_type"]),
+                injury_type=str(kwargs["injury_type"]) if kwargs.get("injury_type") is not None else None,
+                injury_types=kwargs.get("injury_types"),
                 severity=float(kwargs["severity"]),
             )
         return None

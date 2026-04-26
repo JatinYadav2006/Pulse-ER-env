@@ -17,6 +17,9 @@ except Exception:  # pragma: no cover - allows consumer-side imports without run
     RealPulseBackend = None
 
 try:
+    from .injury_stack_adversary import InjuryStackAdversary
+except ImportError:  # pragma: no cover - allows imports when real runtime deps are unavailable
+    InjuryStackAdversary = None
     from .gym_env import PulseGymEnv
 except Exception:  # pragma: no cover - allows imports without optional gymnasium/runtime deps
     PulseGymEnv = None
@@ -47,6 +50,7 @@ __all__ = [
     "CompleteBloodCountResult",
     "EXTENDED_TOOL_NAMES",
     "EnvironmentResponse",
+    "InjuryStackAdversary",
     "INITIAL_TOOL_NAMES",
     "KNOWN_TOOL_NAMES",
     "LactateTrend",

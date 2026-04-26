@@ -50,7 +50,7 @@ GOOD_RUNS = (
             action("airway_support"),
             action("advance_time", seconds=30),
             action("give_oxygen", flow_lpm=15),
-            action("airway_support", mode="basic"),
+            action("airway_support"),
             action("advance_time", seconds=30),
         ),
     ),

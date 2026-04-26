@@ -87,6 +87,21 @@ def coerce_boolean_argument(value: Any) -> bool:
     raise ValueError("boolean coercion failed")
 
 
+def normalize_semantic_argument(tool_name: str, arg_name: str, value: Any) -> Any:
+    """Recover common non-clinical aliases before validation fails closed."""
+
+    if not isinstance(value, str):
+        return value
+
+    token = normalize_contract_token(value)
+
+    if tool_name == "airway_support" and arg_name in {"mode", "support_type"}:
+        if token in {"basic", "default", "standard", "support", "airway_support"}:
+            return "auto"
+
+    return value
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         tool_name="get_vitals",
@@ -453,22 +468,22 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         tool_name="get_blood_gas",
         tier="tier_1",
         description="Order or review arterial blood gas results.",
-        read_only=True,
-        state_changing=False,
+        read_only=False,
+        state_changing=True,
     ),
     ToolSpec(
         tool_name="get_cbc",
         tier="tier_1",
         description="Order or review complete blood count results.",
-        read_only=True,
-        state_changing=False,
+        read_only=False,
+        state_changing=True,
     ),
     ToolSpec(
         tool_name="get_bmp",
         tier="tier_1",
         description="Order or review basic metabolic panel results.",
-        read_only=True,
-        state_changing=False,
+        read_only=False,
+        state_changing=True,
     ),
 )
 
@@ -563,7 +578,11 @@ def validate_tool_arguments(
 
     normalized: dict[str, Any] = {}
     for arg_spec in spec.arguments:
-        value = arguments.get(arg_spec.name)
+        value = normalize_semantic_argument(
+            tool_name,
+            arg_spec.name,
+            arguments.get(arg_spec.name),
+        )
         if value is None:
             if arg_spec.required:
                 raise ToolValidationError(

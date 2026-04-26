@@ -42,20 +42,45 @@ MOCK_DIAGNOSTIC_DELAYS = {
 }
 
 MOCK_EXTENDED_INTERVENTION_EFFECTS = {
+    "give_oxygen": {
+        "baseline_stable": {},
+        "respiratory_distress": {"spo2": 0.04, "respiration_rate_bpm": -3.0, "heart_rate_bpm": -2.0},
+        "hemorrhagic_shock": {"spo2": 0.02, "respiration_rate_bpm": -1.0, "heart_rate_bpm": -1.0},
+    },
+    "give_fluids": {
+        "baseline_stable": {"heart_rate_bpm": 2.0},
+        "respiratory_distress": {"systolic_bp_mmhg": 0.5, "heart_rate_bpm": 1.0},
+        "hemorrhagic_shock": {"systolic_bp_mmhg": 8.0, "diastolic_bp_mmhg": 4.0, "heart_rate_bpm": -4.0, "blood_volume_ml": 300.0},
+    },
+    "control_bleeding": {
+        "baseline_stable": {},
+        "respiratory_distress": {},
+        "hemorrhagic_shock": {"systolic_bp_mmhg": 5.0, "diastolic_bp_mmhg": 2.5, "heart_rate_bpm": -3.0, "blood_volume_ml": 150.0},
+    },
+    "position_patient": {
+        "baseline_stable": {},
+        "respiratory_distress": {"spo2": 0.01, "respiration_rate_bpm": -1.0},
+        "hemorrhagic_shock": {"systolic_bp_mmhg": 2.0, "diastolic_bp_mmhg": 1.0, "respiration_rate_bpm": -1.0},
+    },
+    "airway_support": {
+        "baseline_stable": {"heart_rate_bpm": 1.0},
+        "respiratory_distress": {"spo2": 0.04, "respiration_rate_bpm": -4.0, "heart_rate_bpm": -2.0},
+        "hemorrhagic_shock": {"spo2": 0.01, "respiration_rate_bpm": -1.0, "heart_rate_bpm": -0.5},
+    },
     "give_pressor": {
-        "baseline_stable": {"systolic_bp_mmhg": 2.0, "diastolic_bp_mmhg": 1.0, "heart_rate_bpm": -1.0},
-        "respiratory_distress": {"systolic_bp_mmhg": 4.0, "diastolic_bp_mmhg": 2.0, "heart_rate_bpm": -1.0},
-        "hemorrhagic_shock": {"systolic_bp_mmhg": 10.0, "diastolic_bp_mmhg": 6.0, "heart_rate_bpm": -3.0},
+        "baseline_stable": {"systolic_bp_mmhg": 0.5, "diastolic_bp_mmhg": 0.2, "heart_rate_bpm": 3.0},
+        "respiratory_distress": {"systolic_bp_mmhg": 1.0, "diastolic_bp_mmhg": 0.5, "heart_rate_bpm": 2.0},
+        "hemorrhagic_shock": {"systolic_bp_mmhg": 4.0, "diastolic_bp_mmhg": 2.0, "heart_rate_bpm": -1.0},
     },
     "needle_decompression": {
-        "baseline_stable": {"spo2": 0.0, "respiration_rate_bpm": -0.5},
+        "baseline_stable": {"systolic_bp_mmhg": -1.0, "heart_rate_bpm": 1.0},
         "respiratory_distress": {"spo2": 0.06, "respiration_rate_bpm": -6.0, "heart_rate_bpm": -4.0},
-        "hemorrhagic_shock": {"spo2": 0.01, "respiration_rate_bpm": -1.0, "heart_rate_bpm": -1.0},
+        "hemorrhagic_shock": {"systolic_bp_mmhg": -1.0, "heart_rate_bpm": 0.5},
     },
     "pericardiocentesis": {
-        "baseline_stable": {"systolic_bp_mmhg": 1.0, "diastolic_bp_mmhg": 0.5},
-        "respiratory_distress": {"systolic_bp_mmhg": 2.0, "diastolic_bp_mmhg": 1.0, "heart_rate_bpm": -1.0},
-        "hemorrhagic_shock": {"systolic_bp_mmhg": 5.0, "diastolic_bp_mmhg": 3.0, "heart_rate_bpm": -2.0},
+        "baseline_stable": {"systolic_bp_mmhg": -2.0, "diastolic_bp_mmhg": -1.0, "heart_rate_bpm": 2.0},
+        "respiratory_distress": {"systolic_bp_mmhg": -1.0, "diastolic_bp_mmhg": -0.5, "heart_rate_bpm": 1.0},
+        "hemorrhagic_shock": {"systolic_bp_mmhg": -1.0, "diastolic_bp_mmhg": -0.5, "heart_rate_bpm": 1.0},
     },
 }
 
@@ -85,6 +110,9 @@ class MockPulseAdapter(PatientBackend):
         self._state: PatientState | None = None
         self._step_count = 0
         self._active_supports: set[str] = set()
+        self._tool_counts: dict[str, int] = {}
+        self._last_tool_name: str | None = None
+        self._same_tool_called_consecutively = 0
 
     def reset(self, scenario_id: str | None = None) -> EnvironmentResponse:
         selected_scenario_id = scenario_id or self._default_scenario_id
@@ -99,6 +127,9 @@ class MockPulseAdapter(PatientBackend):
         self._state = self._refresh_state(scenario.initial_state.model_copy(deep=True))
         self._step_count = 0
         self._active_supports = set()
+        self._tool_counts = {}
+        self._last_tool_name = None
+        self._same_tool_called_consecutively = 0
 
         return self._build_response(
             reward=0.0,
@@ -161,13 +192,23 @@ class MockPulseAdapter(PatientBackend):
             return result
 
         self._state = self._refresh_state(self._state)
+        changed_fields = self._changed_fields(previous_state, self._state)
+        tool_usage_count = self._tool_counts.get(action.tool_name, 0) + 1
+        if self._last_tool_name == action.tool_name:
+            self._same_tool_called_consecutively += 1
+        else:
+            self._last_tool_name = action.tool_name
+            self._same_tool_called_consecutively = 1
+        self._tool_counts[action.tool_name] = tool_usage_count
         reward = compute_reward(
             previous_state,
             self._state,
             action.tool_name,
             self._scenario.recommended_actions,
+            tool_usage_count=tool_usage_count,
+            same_tool_called_consecutively=self._same_tool_called_consecutively,
+            state_changed=bool(changed_fields),
         ).total
-        changed_fields = self._changed_fields(previous_state, self._state)
 
         tool_result = result.tool_result or ToolResult(
             tool_name=action.tool_name,
@@ -476,7 +517,12 @@ class MockPulseAdapter(PatientBackend):
         elif tool_name == "position_patient":
             updates["position"] = str(arguments.get("position") or updates.get("position") or "upright")
         elif tool_name == "airway_support":
-            updates["airway_support"] = str(arguments.get("mode") or arguments.get("support_type") or "basic")
+            requested_mode = str(arguments.get("mode") or arguments.get("support_type") or "auto")
+            normalized_mode = requested_mode.strip().lower().replace("-", "_").replace(" ", "_")
+            if normalized_mode in {"auto", "basic", "default", "standard", "support", "airway_support"}:
+                updates["airway_support"] = self._suggest_airway_support_mode()
+            else:
+                updates["airway_support"] = normalized_mode
         elif tool_name == "give_fluids":
             active_infusions = dict(updates.get("active_infusions") or {})
             fluid_name = str(arguments.get("fluid_type") or arguments.get("fluid") or "saline")
@@ -671,6 +717,19 @@ class MockPulseAdapter(PatientBackend):
 
     def _available_tools(self) -> list[str]:
         return list(KNOWN_TOOL_NAMES)
+
+    def _suggest_airway_support_mode(self) -> str:
+        assert self._state is not None
+
+        if self._state.spo2 is not None and self._state.spo2 < 0.85:
+            return "bag_valve_mask"
+        if self._state.spo2 is not None and self._state.spo2 < 0.9:
+            return "cpap"
+        if self._state.mental_status in {"pain", "unresponsive"}:
+            return "tracheal"
+        if self._state.mental_status == "verbal":
+            return "oropharyngeal"
+        return "nasopharyngeal"
 
     def _derive_mental_status(self, spo2: float, systolic_bp_mmhg: float) -> str:
         if spo2 < 0.75 or systolic_bp_mmhg < 60:
