@@ -126,6 +126,12 @@ RESTRICTED_TOOL_NAMES = {
     "apply_pericardial_effusion",
 }
 
+PUBLIC_AVAILABLE_TOOL_NAMES = [
+    tool_name
+    for tool_name in AVAILABLE_TOOL_NAMES
+    if tool_name not in RESTRICTED_TOOL_NAMES
+]
+
 
 @dataclass
 class ToolExecution:
@@ -214,7 +220,7 @@ class PulseToolExecutor:
 
     @property
     def available_tools(self) -> list[str]:
-        return list(AVAILABLE_TOOL_NAMES)
+        return list(PUBLIC_AVAILABLE_TOOL_NAMES)
 
     def execute(self, action: PulsePhysiologyAction) -> ToolExecution:
         """Validate and execute a tool action."""

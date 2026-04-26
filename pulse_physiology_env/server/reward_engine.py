@@ -35,6 +35,8 @@ class RewardTracker:
     diagnostics_ordered: set[str] = field(default_factory=set)
     action_history: list[ActionRecord] = field(default_factory=list)
     time_to_stabilize_s: float | None = None
+    stable_steps_consecutive: int = 0
+    stable_run_start_s: float | None = None
 
 
 @dataclass
@@ -62,6 +64,8 @@ class RewardBreakdown:
     action_budget_remaining: int = 0
     same_tool_called_consecutively: int = 0
     steps_since_last_diagnostic_review: int = 0
+    stable_steps_consecutive: int = 0
+    sustained_stability_confirmed: bool = False
     terminal_applied: bool = False
 
     def as_metadata(self) -> dict[str, Any]:
@@ -84,6 +88,8 @@ class RewardBreakdown:
             "action_budget_remaining": self.action_budget_remaining,
             "same_tool_called_consecutively": self.same_tool_called_consecutively,
             "steps_since_last_diagnostic_review": self.steps_since_last_diagnostic_review,
+            "stable_steps_consecutive": self.stable_steps_consecutive,
+            "sustained_stability_confirmed": self.sustained_stability_confirmed,
             "terminal_applied": self.terminal_applied,
         }
 
@@ -98,6 +104,7 @@ class RewardEngine:
     DIAGNOSTIC_ORDER_WINDOW_S = 180.0
     DIAGNOSTIC_NEGLECT_WINDOW_S = 300.0
     READY_DIAGNOSTIC_GRACE_STEPS = 5
+    SUSTAINED_STABILITY_REQUIRED_STEPS = 3
 
     DIAGNOSTIC_TOOL_ALIASES = {
         "get_blood_gas": "order_arterial_blood_gas",
@@ -254,8 +261,7 @@ class RewardEngine:
             reward_profile=scenario.reward_profile,
             action_budget_remaining=action_budget,
         )
-        if self._is_stabilized(initial_state):
-            tracker.time_to_stabilize_s = initial_state.sim_time_s
+        self._update_stability_window(tracker, initial_state)
         return tracker
 
     def score_step(
@@ -280,6 +286,8 @@ class RewardEngine:
             action_budget_remaining=tracker.action_budget_remaining,
             same_tool_called_consecutively=tracker.same_tool_called_consecutively,
             steps_since_last_diagnostic_review=tracker.steps_since_last_diagnostic_review,
+            stable_steps_consecutive=tracker.stable_steps_consecutive,
+            sustained_stability_confirmed=self._has_sustained_terminal_stability(tracker, after),
         )
 
         breakdown.r_map_stability = self._reward_map_stability(before, after)
@@ -302,12 +310,18 @@ class RewardEngine:
 
         if after.done:
             breakdown.terminal_applied = True
-            breakdown.survival_bonus = 5.0 if self._is_alive(after) else -5.0
-            breakdown.time_efficiency_bonus = self._time_efficiency_bonus(tracker, scenario, after)
-            breakdown.sequence_quality_bonus = self.evaluate_milestone_sequence(
-                tracker.action_history,
-                tracker.reward_profile,
-            )
+            if self._is_alive(after):
+                if self._has_sustained_terminal_stability(tracker, after):
+                    breakdown.survival_bonus = 5.0
+                    breakdown.time_efficiency_bonus = self._time_efficiency_bonus(tracker, scenario, after)
+                    breakdown.sequence_quality_bonus = self.evaluate_milestone_sequence(
+                        tracker.action_history,
+                        tracker.reward_profile,
+                    )
+                else:
+                    breakdown.survival_bonus = 0.0
+            else:
+                breakdown.survival_bonus = -5.0
             breakdown.terminal_total = (
                 breakdown.survival_bonus
                 + breakdown.time_efficiency_bonus
@@ -379,8 +393,7 @@ class RewardEngine:
             )
         )
 
-        if tracker.time_to_stabilize_s is None and self._is_stabilized(after):
-            tracker.time_to_stabilize_s = after.sim_time_s
+        self._update_stability_window(tracker, after)
 
     def _reward_map_stability(self, before: PatientState, after: PatientState) -> float:
         previous_map = before.mean_arterial_pressure_mmhg or 0.0
@@ -610,11 +623,41 @@ class RewardEngine:
         after: PatientState,
     ) -> float:
         time_to_stabilize = tracker.time_to_stabilize_s
-        if time_to_stabilize is None and self._is_stabilized(after):
-            time_to_stabilize = after.sim_time_s
         if time_to_stabilize is None:
             return 0.0
         return max(0.0, (scenario.max_time_s - time_to_stabilize) / scenario.max_time_s) * 2.0
+
+    def _update_stability_window(self, tracker: RewardTracker, state: PatientState) -> None:
+        """Track only the current stability run so terminal bonuses require sustained control."""
+
+        if not self._is_stabilized(state):
+            tracker.stable_steps_consecutive = 0
+            tracker.stable_run_start_s = None
+            tracker.time_to_stabilize_s = None
+            return
+
+        if tracker.stable_steps_consecutive == 0:
+            tracker.stable_run_start_s = state.sim_time_s
+        tracker.stable_steps_consecutive += 1
+
+        if tracker.stable_steps_consecutive >= self.SUSTAINED_STABILITY_REQUIRED_STEPS:
+            tracker.time_to_stabilize_s = (
+                tracker.stable_run_start_s if tracker.stable_run_start_s is not None else state.sim_time_s
+            )
+        else:
+            tracker.time_to_stabilize_s = None
+
+    def _has_sustained_terminal_stability(
+        self,
+        tracker: RewardTracker,
+        state: PatientState,
+    ) -> bool:
+        return (
+            self._is_alive(state)
+            and self._is_stabilized(state)
+            and tracker.stable_steps_consecutive >= self.SUSTAINED_STABILITY_REQUIRED_STEPS
+            and tracker.time_to_stabilize_s is not None
+        )
 
     def _find_milestone_index(self, action_history: list[ActionRecord], milestone_name: str) -> int:
         for idx, record in enumerate(action_history):

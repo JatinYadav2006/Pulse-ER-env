@@ -9,6 +9,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import importlib
 import inspect
 from pathlib import Path
@@ -42,6 +43,15 @@ REQUIRED_OBSERVATION_FIELDS = {
 }
 
 REQUIRED_ENVELOPE_FIELDS = {"observation", "reward", "done", "metadata", "tool_result", "error"}
+
+
+@dataclass(frozen=True)
+class _RewardScenarioFixture:
+    """Minimal scenario-like object for reward regression checks."""
+
+    reward_profile: str = "polytrauma"
+    difficulty: str = "medium"
+    max_time_s: float = 1800.0
 
 
 class _ConstructorNoScenarioBackend:
@@ -252,6 +262,118 @@ def _regression_check_readme_frontmatter() -> None:
     )
 
 
+def _regression_check_restricted_tool_surface() -> None:
+    """Ensure scenario-authoring tools are hidden from the public tool surface."""
+
+    from pulse_physiology_env.server.tools import PulseToolExecutor, RESTRICTED_TOOL_NAMES
+
+    executor = PulseToolExecutor(object())  # type: ignore[arg-type]
+    exposed = sorted(set(executor.available_tools) & set(RESTRICTED_TOOL_NAMES))
+    _assert(
+        not exposed,
+        f"restricted_tool_surface: restricted tools leaked into available_tools: {', '.join(exposed)}",
+    )
+
+
+def _patient_state_fixture(
+    *,
+    sim_time_s: float,
+    mean_arterial_pressure_mmhg: float,
+    spo2: float,
+    done: bool = False,
+    heart_rate_bpm: float = 96.0,
+    mental_status: str = "alert",
+    active_alerts: list[str] | None = None,
+) -> PatientState:
+    """Build compact patient states for reward-gating regression checks."""
+
+    return PatientState(
+        scenario_id="reward_regression_case",
+        patient_id="reward_regression_patient",
+        sim_time_s=sim_time_s,
+        heart_rate_bpm=heart_rate_bpm,
+        systolic_bp_mmhg=110.0,
+        diastolic_bp_mmhg=70.0,
+        mean_arterial_pressure_mmhg=mean_arterial_pressure_mmhg,
+        spo2=spo2,
+        respiration_rate_bpm=18.0,
+        blood_volume_ml=5200.0,
+        mental_status=mental_status,  # type: ignore[arg-type]
+        active_alerts=list(active_alerts or []),
+        done=done,
+    )
+
+
+def _regression_check_sustained_stability_gate() -> None:
+    """Ensure transient stabilization does not leak positive terminal bonuses."""
+
+    from pulse_physiology_env.server.reward_engine import RewardEngine
+
+    scenario = _RewardScenarioFixture()
+    action = ToolAction(tool_name="advance_time", arguments={"seconds": 30})
+    engine = RewardEngine()
+
+    unstable_start = _patient_state_fixture(
+        sim_time_s=0.0,
+        mean_arterial_pressure_mmhg=58.0,
+        spo2=0.89,
+        active_alerts=["hypotension", "hypoxemia"],
+    )
+    stable_1 = _patient_state_fixture(sim_time_s=30.0, mean_arterial_pressure_mmhg=70.0, spo2=0.95)
+    stable_2 = _patient_state_fixture(sim_time_s=60.0, mean_arterial_pressure_mmhg=72.0, spo2=0.96)
+    stable_3 = _patient_state_fixture(sim_time_s=90.0, mean_arterial_pressure_mmhg=73.0, spo2=0.97)
+    terminal_dead = _patient_state_fixture(
+        sim_time_s=120.0,
+        mean_arterial_pressure_mmhg=0.0,
+        spo2=0.40,
+        heart_rate_bpm=0.0,
+        mental_status="unresponsive",
+        active_alerts=["cardiac_arrest"],
+        done=True,
+    )
+
+    tracker = engine.start_episode(scenario, unstable_start)
+    engine.score_step(tracker, scenario=scenario, before=unstable_start, after=stable_1, action=action, success=True, had_error=False)
+    engine.score_step(tracker, scenario=scenario, before=stable_1, after=stable_2, action=action, success=True, had_error=False)
+    engine.score_step(tracker, scenario=scenario, before=stable_2, after=stable_3, action=action, success=True, had_error=False)
+    dead_breakdown = engine.score_step(
+        tracker,
+        scenario=scenario,
+        before=stable_3,
+        after=terminal_dead,
+        action=action,
+        success=True,
+        had_error=False,
+    )
+    _assert(
+        dead_breakdown.time_efficiency_bonus == 0.0 and dead_breakdown.sequence_quality_bonus == 0.0,
+        "sustained_stability_gate: terminal death should not keep positive time or sequence bonuses after deterioration",
+    )
+
+    stable_terminal = _patient_state_fixture(
+        sim_time_s=90.0,
+        mean_arterial_pressure_mmhg=73.0,
+        spo2=0.97,
+        done=True,
+    )
+    tracker = engine.start_episode(scenario, unstable_start)
+    engine.score_step(tracker, scenario=scenario, before=unstable_start, after=stable_1, action=action, success=True, had_error=False)
+    engine.score_step(tracker, scenario=scenario, before=stable_1, after=stable_2, action=action, success=True, had_error=False)
+    stable_breakdown = engine.score_step(
+        tracker,
+        scenario=scenario,
+        before=stable_2,
+        after=stable_terminal,
+        action=action,
+        success=True,
+        had_error=False,
+    )
+    _assert(
+        stable_breakdown.survival_bonus == 5.0 and stable_breakdown.time_efficiency_bonus > 0.0,
+        "sustained_stability_gate: sustained stabilization should still earn positive terminal credit",
+    )
+
+
 def _regression_check_argument_normalization() -> None:
     """Ensure harmless formatting noise is normalized instead of penalized."""
 
@@ -355,6 +477,10 @@ def main() -> None:
     print("PASS real backend wrapper shape")
     _regression_check_readme_frontmatter()
     print("PASS README frontmatter encoding")
+    _regression_check_restricted_tool_surface()
+    print("PASS restricted tool surface")
+    _regression_check_sustained_stability_gate()
+    print("PASS sustained stability reward gate")
     _regression_check_argument_normalization()
     print("PASS argument normalization")
     _regression_check_stacked_pathology_blueprints()
