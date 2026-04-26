@@ -7,48 +7,133 @@ import os
 from functools import lru_cache
 from typing import Any
 
+from pulse_physiology_env.demo_llm_policy import heuristic_infer_fn
 from pulse_physiology_env.episode_runner import EpisodeRunner, EpisodeTrace
 from pulse_physiology_env.eval_mock import score_policy, score_random_policy
-from pulse_physiology_env.policies import build_expert_policy
+from pulse_physiology_env.policies import LLMPolicy, RandomPolicy, build_expert_policy, build_no_action_policy
 from pulse_physiology_env.server.adapters import KNOWN_TOOL_NAMES, MockPulseAdapter
 from pulse_physiology_env.server.pathology_architect import PathologyArchitect
-from pulse_physiology_env.demo_llm_policy import heuristic_infer_fn
-from pulse_physiology_env.policies import LLMPolicy, build_no_action_policy
+from pulse_physiology_env.server.tools import AVAILABLE_TOOL_NAMES, CLINICAL_45_TOOL_NAMES
 
 DEFAULT_SPACE_SCENARIO = "respiratory_distress"
+DEFAULT_SPACE_POLICY = "expert"
+RUNTIME_SETTINGS = {
+    "observation_noise_level": 0.3,
+    "time_pressure_enabled": True,
+    "seed": 0,
+    "max_steps": 8,
+}
+
+POLICY_META: dict[str, dict[str, str]] = {
+    "expert": {
+        "label": "Expert",
+        "summary": "Deterministic-plus-adaptive baseline that follows authored playbooks and trauma heuristics.",
+    },
+    "llm_demo": {
+        "label": "LLM Demo",
+        "summary": "Prompt-driven heuristic baseline that is stronger than random but still inconsistent on harder scenarios.",
+    },
+    "random": {
+        "label": "Random",
+        "summary": "Uninformed tool caller that samples valid actions without clinical sequencing.",
+    },
+    "no_action": {
+        "label": "No Action",
+        "summary": "Passive baseline that mostly advances time and lets the patient deteriorate untreated.",
+    },
+}
+
 SPACE_SCENARIO_META: dict[str, dict[str, str]] = {
     "baseline_stable": {
         "label": "Baseline Stable",
-        "title": "Baseline Stability Replay",
+        "title": "Baseline Stability Console",
         "summary": (
-            "A low-acuity mock case shown under observation noise and time pressure. "
-            "The main signal here is restraint: unnecessary intervention loses reward, while basic assessment keeps the patient stable."
+            "A low-acuity case that exposes policy restraint. The useful signal here is not dramatic rescue, "
+            "but avoiding needless interventions while keeping the patient stable under noisy observations."
         ),
-        "teaching_point": "assess before escalating care",
+        "teaching_point": "assess first and avoid over-treatment in stable physiology",
     },
     "respiratory_distress": {
         "label": "Respiratory Distress",
-        "title": "Respiratory Rescue Demo Episode",
+        "title": "Respiratory Rescue Console",
         "summary": (
-            "A reproducible eight-step respiratory rescue on the deterministic mock backend. "
-            "The expert sequence restores oxygenation and lowers respiratory workload under noisy monitoring."
+            "A reproducible respiratory deterioration case under observation noise and time pressure. "
+            "The replay shows how the trained policy restores oxygenation and lowers work of breathing through ordered support."
         ),
-        "teaching_point": "stabilize oxygenation before waiting",
+        "teaching_point": "restore oxygenation early and do not wait through worsening hypoxemia",
     },
     "hemorrhagic_shock": {
         "label": "Hemorrhagic Shock",
-        "title": "Hemorrhagic Shock Replay",
+        "title": "Hemorrhagic Shock Console",
         "summary": (
             "A circulation-first case where delayed action is punished quickly. "
-            "The replay highlights how rapid hemorrhage control and resuscitation separate trained policies from passive ones."
+            "This view is useful because it shows how strongly the environment separates hemorrhage control from passive or noisy policies."
         ),
-        "teaching_point": "control shock early and avoid delay",
+        "teaching_point": "treat shock early, because delay compounds deterioration",
     },
 }
+
+TOOL_GROUPS: list[dict[str, Any]] = [
+    {
+        "name": "Assessment",
+        "summary": "Initial reads, triage summaries, and deterioration checks.",
+        "tools": [
+            "get_vitals",
+            "get_respiratory_status",
+            "check_deterioration",
+            "summarize_state",
+            "recommend_next_step",
+        ],
+    },
+    {
+        "name": "Airway / Breathing",
+        "summary": "Respiratory support, decompression, and patient positioning.",
+        "tools": [
+            "give_oxygen",
+            "airway_support",
+            "needle_decompression",
+            "position_patient",
+        ],
+    },
+    {
+        "name": "Circulation",
+        "summary": "Hemorrhage control, fluids, and pressor escalation.",
+        "tools": [
+            "control_bleeding",
+            "give_fluids",
+            "give_pressor",
+        ],
+    },
+    {
+        "name": "Diagnostics",
+        "summary": "Delayed labs that become available after simulated time passes.",
+        "tools": [
+            "get_blood_gas",
+            "get_cbc",
+            "get_bmp",
+        ],
+    },
+    {
+        "name": "Procedures / Flow",
+        "summary": "Procedural intervention and time control inside the episode loop.",
+        "tools": [
+            "pericardiocentesis",
+            "advance_time",
+        ],
+    },
+]
 
 
 def _patient_count() -> int:
     return len(PathologyArchitect().supported_patients())
+
+
+def _injury_count() -> int:
+    return len(PathologyArchitect().supported_injury_types())
+
+
+def _combo_count() -> int:
+    return len(PathologyArchitect().default_injury_combos())
 
 
 def _repo_url() -> str:
@@ -77,6 +162,7 @@ def _trace_to_payload(trace: EpisodeTrace) -> dict[str, Any]:
             "diastolic_bp_mmhg": initial.diastolic_bp_mmhg,
             "spo2": initial.spo2,
             "respiration_rate_bpm": initial.respiration_rate_bpm,
+            "blood_volume_ml": initial.blood_volume_ml,
             "mental_status": getattr(initial.mental_status, "value", initial.mental_status),
             "active_alerts": list(initial.active_alerts),
         }
@@ -101,6 +187,7 @@ def _trace_to_payload(trace: EpisodeTrace) -> dict[str, Any]:
                 "diastolic_bp_mmhg": obs.diastolic_bp_mmhg,
                 "spo2": obs.spo2,
                 "respiration_rate_bpm": obs.respiration_rate_bpm,
+                "blood_volume_ml": obs.blood_volume_ml,
                 "mental_status": getattr(obs.mental_status, "value", obs.mental_status),
                 "active_alerts": list(obs.active_alerts),
             }
@@ -111,6 +198,7 @@ def _trace_to_payload(trace: EpisodeTrace) -> dict[str, Any]:
         "scenario_id": trace.scenario_id,
         "policy_name": trace.policy_name,
         "summary": final_summary,
+        "events": list(trace.events),
         "frames": frames,
         "action_log": [
             {
@@ -121,6 +209,7 @@ def _trace_to_payload(trace: EpisodeTrace) -> dict[str, Any]:
             }
             for step in trace.steps
         ],
+        "config": dict(RUNTIME_SETTINGS),
     }
 
 
@@ -136,7 +225,11 @@ def get_policy_benchmark_payload() -> dict[str, Any]:
 
     comparison = [
         {"label": "Expert", "value": expert.average_reward, "status": "good"},
-        {"label": "LLM Demo", "value": llm_demo.average_reward, "status": "good" if llm_demo.average_reward > 0 else "warn"},
+        {
+            "label": "LLM Demo",
+            "value": llm_demo.average_reward,
+            "status": "good" if llm_demo.average_reward > 0 else "warn",
+        },
         {"label": "Random", "value": random_policy.average_reward, "status": "bad"},
         {"label": "No Action", "value": no_action.average_reward, "status": "bad"},
     ]
@@ -162,16 +255,41 @@ def _normalize_space_scenario(scenario_id: str | None, benchmarks: dict[str, Any
     return DEFAULT_SPACE_SCENARIO if DEFAULT_SPACE_SCENARIO in available else available[0]
 
 
-@lru_cache(maxsize=8)
-def get_demo_episode_payload(scenario_id: str = DEFAULT_SPACE_SCENARIO) -> dict[str, Any]:
+def _available_policy_names() -> list[str]:
+    return list(POLICY_META.keys())
+
+
+def _normalize_policy_name(policy_name: str | None) -> str:
+    if policy_name in POLICY_META:
+        return policy_name
+    return DEFAULT_SPACE_POLICY
+
+
+def _build_policy(policy_name: str):
+    if policy_name == "expert":
+        return build_expert_policy()
+    if policy_name == "llm_demo":
+        return LLMPolicy(infer_fn=heuristic_infer_fn, name="llm_demo")
+    if policy_name == "random":
+        return RandomPolicy(seed=RUNTIME_SETTINGS["seed"])
+    if policy_name == "no_action":
+        return build_no_action_policy()
+    raise ValueError(f"Unsupported policy: {policy_name}")
+
+
+@lru_cache(maxsize=32)
+def get_demo_episode_payload(
+    scenario_id: str = DEFAULT_SPACE_SCENARIO,
+    policy_name: str = DEFAULT_SPACE_POLICY,
+) -> dict[str, Any]:
     backend = MockPulseAdapter(
         default_scenario_id=scenario_id,
-        observation_noise_level=0.3,
-        time_pressure_enabled=True,
-        seed=0,
+        observation_noise_level=RUNTIME_SETTINGS["observation_noise_level"],
+        time_pressure_enabled=RUNTIME_SETTINGS["time_pressure_enabled"],
+        seed=RUNTIME_SETTINGS["seed"],
     )
-    runner = EpisodeRunner(backend=backend, max_steps=8)
-    policy = build_expert_policy()
+    runner = EpisodeRunner(backend=backend, max_steps=RUNTIME_SETTINGS["max_steps"])
+    policy = _build_policy(_normalize_policy_name(policy_name))
     try:
         trace = runner.run(policy=policy, scenario_id=scenario_id)
     finally:
@@ -186,7 +304,7 @@ def _build_primary_scenario(scenario_id: str, demo: dict[str, Any], benchmarks: 
         scenario_id,
         {
             "label": scenario_id.replace("_", " ").title(),
-            "title": f"{scenario_id.replace('_', ' ').title()} Replay",
+            "title": f"{scenario_id.replace('_', ' ').title()} Console",
             "summary": "Deterministic mock replay for the selected scenario.",
             "teaching_point": "follow the measured physiology signal",
         },
@@ -196,55 +314,170 @@ def _build_primary_scenario(scenario_id: str, demo: dict[str, Any], benchmarks: 
     final = demo["summary"]
     expert_rr = benchmarks["per_scenario"]["expert"][scenario_id]
     no_action_rr = benchmarks["per_scenario"]["no_action"][scenario_id]
+    selected_policy = demo["policy_name"]
+    selected_label = POLICY_META.get(selected_policy, {}).get("label", selected_policy.replace("_", " ").title())
     return {
         "title": meta["title"],
-        "tag": "SPACE REPLAY",
+        "tag": "EVALUATION CONSOLE",
         "summary": meta["summary"],
         "teaching_point": meta["teaching_point"],
         "naive_outcome": (
-            f"No-action baseline on {scenario_id}: {no_action_rr:+.3f} reward "
-            "with progressive deterioration."
+            f"No-action baseline on {scenario_id}: {no_action_rr:+.3f} reward with progressive deterioration."
         ),
         "trained_outcome": (
             f"Expert replay improves SpO2 from {first_observed['spo2'] * 100:.1f}% "
             f"to {final['spo2_percent']:.1f}% and finishes at {expert_rr:+.3f} reward."
         ),
+        "selected_outcome": (
+            f"{selected_label} on {scenario_id} ended with {final['termination_reason']} at "
+            f"{final['total_reward']:+.3f} reward after {final['num_steps']} steps."
+        ),
     }
 
 
-def _build_research_highlights(demo: dict[str, Any], benchmarks: dict[str, Any]) -> list[dict[str, str]]:
+def _build_research_highlights(benchmarks: dict[str, Any]) -> list[dict[str, str]]:
     return [
-        {"label": f"{len(KNOWN_TOOL_NAMES)}-tool contract", "value": "public tool surface used by the Space"},
+        {"label": f"{len(KNOWN_TOOL_NAMES)} public tools", "value": "consumer contract exposed in the Space"},
+        {"label": f"{len(CLINICAL_45_TOOL_NAMES)} clinical tools", "value": "full clinical intervention surface in the real runtime"},
+        {"label": f"{len(AVAILABLE_TOOL_NAMES)} runtime names", "value": "combined real backend execution/alias surface"},
         {"label": f"{_patient_count()} patient profiles", "value": "supported by PathologyArchitect"},
-        {"label": f"{benchmarks['comparison'][0]['value']:+.3f} avg", "value": "expert average reward on eval_mock"},
-        {"label": f"{benchmarks['comparison'][3]['value']:+.3f} avg", "value": "no-action average reward on eval_mock"},
     ]
 
 
-def get_dashboard_payload(scenario_id: str | None = None) -> dict[str, Any]:
+def _build_tool_surface() -> dict[str, Any]:
+    return {
+        "public_contract_count": len(KNOWN_TOOL_NAMES),
+        "clinical_surface_count": len(CLINICAL_45_TOOL_NAMES),
+        "runtime_name_count": len(AVAILABLE_TOOL_NAMES),
+        "groups": TOOL_GROUPS,
+    }
+
+
+def _build_engine_layers() -> list[dict[str, str]]:
+    return [
+        {
+            "title": "Physiology Core",
+            "value": "Pulse 4.3.2",
+            "detail": "Real backend runs on the Pulse physiology engine rather than a hand-scripted simulator.",
+        },
+        {
+            "title": "Reward Engine",
+            "value": "Safety-shaped",
+            "detail": "Dense reward, sequencing penalties, and terminal scoring drive clinically ordered behavior.",
+        },
+        {
+            "title": "ATLS Judge",
+            "value": "Protocol scoring",
+            "detail": "Action history can be graded into human-readable pass/fail protocol checks.",
+        },
+        {
+            "title": "Runtime Effects",
+            "value": "Noise + time pressure",
+            "detail": "Observation perturbations and deterioration pressure make the policy work under uncertainty.",
+        },
+        {
+            "title": "PathologyArchitect",
+            "value": f"{_injury_count()} injury families",
+            "detail": f"{_patient_count()} baseline patients and {_combo_count()} default combo ladders support generated trauma cases.",
+        },
+        {
+            "title": "Adversarial Evaluation",
+            "value": "Breaking points",
+            "detail": "Policies can be stress-tested with stacked injuries rather than judged on single static prompts.",
+        },
+    ]
+
+
+def _build_benchmark_matrix(benchmarks: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for scenario_id in _available_space_scenarios(benchmarks):
+        rows.append(
+            {
+                "scenario_id": scenario_id,
+                "label": SPACE_SCENARIO_META.get(scenario_id, {}).get("label", scenario_id.replace("_", " ").title()),
+                "expert": benchmarks["per_scenario"]["expert"][scenario_id],
+                "llm_demo": benchmarks["per_scenario"]["llm_demo"][scenario_id],
+                "random": benchmarks["per_scenario"]["random"][scenario_id],
+                "no_action": benchmarks["per_scenario"]["no_action"][scenario_id],
+            }
+        )
+    return rows
+
+
+def _build_runtime_profile(demo: dict[str, Any]) -> list[dict[str, str]]:
+    summary = demo["summary"]
+    config = demo["config"]
+    return [
+        {"label": "Seed", "value": str(config["seed"])},
+        {"label": "Noise", "value": f"{config['observation_noise_level']:.1f}"},
+        {"label": "Time pressure", "value": "enabled" if config["time_pressure_enabled"] else "disabled"},
+        {"label": "Step budget", "value": str(config["max_steps"])},
+        {"label": "Final mental status", "value": str(summary["mental_status"])},
+        {"label": "Alert count", "value": str(len(summary["active_alerts"]))},
+    ]
+
+
+def _build_policy_outcome(demo: dict[str, Any]) -> list[dict[str, str]]:
+    summary = demo["summary"]
+    systolic = summary["systolic_bp_mmhg"]
+    diastolic = summary["diastolic_bp_mmhg"]
+    map_proxy = (
+        f"{round((systolic + 2 * diastolic) / 3)} mmHg"
+        if systolic is not None and diastolic is not None
+        else "n/a"
+    )
+    return [
+        {"label": "Termination", "value": summary["termination_reason"].replace("_", " ")},
+        {"label": "Total reward", "value": f"{summary['total_reward']:+.3f}"},
+        {"label": "Steps executed", "value": str(summary["num_steps"])},
+        {"label": "Final SpO2", "value": f"{summary['spo2_percent']:.1f}%" if summary["spo2_percent"] is not None else "n/a"},
+        {"label": "Final MAP proxy", "value": map_proxy},
+        {"label": "Final alerts", "value": str(len(summary["active_alerts"]))},
+    ]
+
+
+def get_dashboard_payload(scenario_id: str | None = None, policy_name: str | None = None) -> dict[str, Any]:
     benchmarks = get_policy_benchmark_payload()
     selected_scenario = _normalize_space_scenario(scenario_id, benchmarks)
-    demo = get_demo_episode_payload(selected_scenario)
+    selected_policy = _normalize_policy_name(policy_name)
+    demo = get_demo_episode_payload(selected_scenario, selected_policy)
     scenario = _build_primary_scenario(selected_scenario, demo, benchmarks)
     return {
         "hero": {
             "title": "Pulse-ER",
-            "subtitle": "Emergency Room Dashboard",
+            "subtitle": "Physiology Evaluation Console",
             "description": (
-                "A trauma-medicine reinforcement-learning environment backed by Pulse physiology. "
-                "The dashboard pairs live-looking patient telemetry with measured benchmark evidence "
-                "so judges can see both the clinical story and the learning signal immediately."
+                "A trauma reinforcement-learning environment backed by Pulse physiology. "
+                "This Space exposes more than a single replay: scenario controls, policy execution, "
+                "tool surface, runtime profile, and evaluation stack are all surfaced directly so the environment reads like a real benchmark console."
             ),
-            "badges": [f"{len(KNOWN_TOOL_NAMES)}-tool contract", f"{_patient_count()} patient profiles", "Pulse 4.3.2 validated"],
+            "badges": [
+                f"{len(KNOWN_TOOL_NAMES)}-tool public contract",
+                f"{len(CLINICAL_45_TOOL_NAMES)}-tool clinical surface",
+                "Pulse 4.3.2 runtime",
+            ],
         },
         "selected_scenario": selected_scenario,
+        "selected_policy": selected_policy,
         "available_scenarios": [
-            {"id": scenario_key, "label": SPACE_SCENARIO_META.get(scenario_key, {}).get("label", scenario_key.replace("_", " ").title())}
+            {
+                "id": scenario_key,
+                "label": SPACE_SCENARIO_META.get(scenario_key, {}).get("label", scenario_key.replace("_", " ").title()),
+            }
             for scenario_key in _available_space_scenarios(benchmarks)
+        ],
+        "available_policies": [
+            {"id": policy_key, "label": POLICY_META[policy_key]["label"], "summary": POLICY_META[policy_key]["summary"]}
+            for policy_key in _available_policy_names()
         ],
         "scenario": scenario,
         "policy_comparison": benchmarks["comparison"],
-        "research_highlights": _build_research_highlights(demo, benchmarks),
+        "benchmark_matrix": _build_benchmark_matrix(benchmarks),
+        "research_highlights": _build_research_highlights(benchmarks),
+        "tool_surface": _build_tool_surface(),
+        "engine_layers": _build_engine_layers(),
+        "runtime_profile": _build_runtime_profile(demo),
+        "policy_outcome": _build_policy_outcome(demo),
         "demo_episode": demo,
         "links": {
             "repo_url": _repo_url(),
@@ -260,21 +493,23 @@ def build_dashboard_html() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Pulse-ER Emergency Room Dashboard</title>
+  <title>Pulse-ER Physiology Evaluation Console</title>
   <style>
     :root {{
-      --bg: #0b1020;
-      --panel: rgba(18, 27, 46, 0.92);
-      --panel-strong: rgba(15, 22, 38, 0.98);
-      --border: rgba(115, 158, 214, 0.24);
-      --text: #eef5ff;
-      --muted: #8da2c4;
-      --cyan: #57d6ff;
+      --bg: #08111f;
+      --panel: rgba(15, 24, 41, 0.92);
+      --panel-strong: rgba(10, 17, 30, 0.98);
+      --panel-soft: rgba(28, 41, 66, 0.35);
+      --border: rgba(118, 154, 219, 0.2);
+      --text: #eef4ff;
+      --muted: #93a7c8;
+      --cyan: #5fd8ff;
       --teal: #47e5bb;
       --amber: #ffc35a;
-      --red: #ff6c81;
-      --green: #5cf2a2;
-      --shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+      --red: #ff7388;
+      --green: #5af0a5;
+      --violet: #9b8cff;
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.34);
       --font: "Segoe UI", "IBM Plex Sans", "Helvetica Neue", sans-serif;
     }}
     * {{ box-sizing: border-box; }}
@@ -282,61 +517,61 @@ def build_dashboard_html() -> str:
       margin: 0;
       min-height: 100vh;
       font-family: var(--font);
-      background:
-        radial-gradient(circle at 15% 20%, rgba(87, 214, 255, 0.18), transparent 28%),
-        radial-gradient(circle at 85% 0%, rgba(71, 229, 187, 0.16), transparent 25%),
-        linear-gradient(180deg, #09101d 0%, #0b1020 100%);
       color: var(--text);
+      background:
+        radial-gradient(circle at 12% 15%, rgba(95, 216, 255, 0.16), transparent 22%),
+        radial-gradient(circle at 86% 0%, rgba(71, 229, 187, 0.12), transparent 22%),
+        linear-gradient(180deg, #07101d 0%, #08111f 100%);
     }}
     .shell {{
-      width: min(1380px, calc(100vw - 32px));
-      margin: 24px auto 40px;
+      width: min(1540px, calc(100vw - 28px));
+      margin: 20px auto 36px;
+      display: grid;
+      gap: 18px;
+    }}
+    .panel {{
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 26px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      backdrop-filter: blur(18px);
     }}
     .hero {{
       display: grid;
       grid-template-columns: 1.2fr 0.8fr;
       gap: 18px;
-      margin-bottom: 18px;
-    }}
-    .panel {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      box-shadow: var(--shadow);
-      border-radius: 24px;
-      overflow: hidden;
-      backdrop-filter: blur(18px);
     }}
     .hero-main {{
-      padding: 28px 30px 26px;
-      position: relative;
+      padding: 30px 32px 28px;
     }}
     .eyebrow {{
       display: inline-flex;
-      gap: 10px;
       align-items: center;
-      font-size: 12px;
-      letter-spacing: 0.18em;
+      gap: 10px;
       text-transform: uppercase;
+      letter-spacing: 0.18em;
       color: var(--cyan);
-      font-weight: 700;
+      font-weight: 800;
+      font-size: 12px;
     }}
     .hero-title {{
       margin: 12px 0 8px;
-      font-size: clamp(34px, 5vw, 58px);
+      font-size: clamp(38px, 5vw, 60px);
       line-height: 0.94;
-      letter-spacing: -0.04em;
+      letter-spacing: -0.05em;
     }}
     .hero-subtitle {{
       margin: 0 0 14px;
-      font-size: clamp(18px, 2vw, 24px);
-      color: #d8e7ff;
-      font-weight: 600;
+      font-size: clamp(20px, 2vw, 28px);
+      color: #d9e7ff;
+      font-weight: 650;
     }}
     .hero-copy {{
       margin: 0;
-      max-width: 60ch;
+      max-width: 68ch;
       color: var(--muted);
-      line-height: 1.65;
+      line-height: 1.68;
       font-size: 15px;
     }}
     .badge-row {{
@@ -348,93 +583,61 @@ def build_dashboard_html() -> str:
     .badge {{
       padding: 10px 14px;
       border-radius: 999px;
-      background: rgba(90, 115, 169, 0.15);
-      border: 1px solid rgba(109, 149, 220, 0.22);
-      color: #e7f1ff;
+      background: rgba(76, 106, 163, 0.14);
+      border: 1px solid rgba(124, 160, 224, 0.22);
       font-size: 13px;
-      font-weight: 600;
+      font-weight: 650;
     }}
     .hero-side {{
       padding: 24px;
       display: grid;
-      gap: 14px;
+      gap: 12px;
       align-content: start;
     }}
-    .scenario-pill {{
-      align-self: start;
+    .section-label {{
       display: inline-flex;
+      align-items: center;
+      width: fit-content;
       padding: 7px 12px;
       border-radius: 999px;
       background: rgba(255, 195, 90, 0.12);
       color: var(--amber);
-      font-size: 12px;
-      letter-spacing: 0.14em;
       text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 12px;
       font-weight: 800;
     }}
-    .scenario-title {{
-      margin: 6px 0 8px;
-      font-size: 24px;
-      line-height: 1.15;
-    }}
-    .scenario-copy {{
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.55;
-      font-size: 14px;
-    }}
-    .scenario-selector {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 4px;
-    }}
-    .scenario-chip {{
-      appearance: none;
-      border: 1px solid rgba(109, 149, 220, 0.22);
-      background: rgba(90, 115, 169, 0.12);
-      color: #dcecff;
-      padding: 10px 12px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      cursor: pointer;
-      transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
-    }}
-    .scenario-chip:hover {{
-      transform: translateY(-1px);
-      border-color: rgba(87, 214, 255, 0.45);
-    }}
-    .scenario-chip.active {{
-      background: linear-gradient(135deg, rgba(87, 214, 255, 0.26), rgba(71, 229, 187, 0.16));
-      border-color: rgba(87, 214, 255, 0.5);
-      color: #f3fbff;
-    }}
-    .scenario-contrast {{
+    .layer-grid {{
       display: grid;
-      gap: 10px;
-      margin-top: 6px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
     }}
-    .contrast-card {{
-      padding: 14px 16px;
+    .layer-card {{
+      padding: 15px 16px;
       border-radius: 18px;
       background: var(--panel-strong);
       border: 1px solid rgba(255,255,255,0.06);
     }}
-    .contrast-card strong {{
-      display: block;
-      margin-bottom: 6px;
-      font-size: 12px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
+    .layer-title {{
+      color: #dfeaff;
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 4px;
     }}
-    .contrast-card.bad strong {{ color: var(--red); }}
-    .contrast-card.good strong {{ color: var(--green); }}
-    .dashboard {{
+    .layer-value {{
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin-bottom: 6px;
+    }}
+    .layer-detail {{
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }}
+    .main-grid {{
       display: grid;
-      grid-template-columns: 1.15fr 0.85fr;
+      grid-template-columns: 1.2fr 0.8fr;
       gap: 18px;
     }}
     .stack {{
@@ -462,9 +665,114 @@ def build_dashboard_html() -> str:
       text-transform: uppercase;
       letter-spacing: 0.12em;
     }}
-    .monitor-grid {{
+    .scenario-head {{
+      display: grid;
+      gap: 10px;
+      margin-bottom: 18px;
+    }}
+    .scenario-title {{
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.06;
+      letter-spacing: -0.04em;
+    }}
+    .scenario-copy {{
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+    }}
+    .scenario-selector {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }}
+    .scenario-chip {{
+      appearance: none;
+      border: 1px solid rgba(109, 149, 220, 0.22);
+      background: rgba(90, 115, 169, 0.12);
+      color: #dcecff;
+      padding: 10px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+    }}
+    .scenario-chip:hover {{
+      transform: translateY(-1px);
+      border-color: rgba(87, 214, 255, 0.45);
+    }}
+    .scenario-chip.active {{
+      background: linear-gradient(135deg, rgba(87, 214, 255, 0.26), rgba(71, 229, 187, 0.16));
+      border-color: rgba(87, 214, 255, 0.5);
+      color: #f3fbff;
+    }}
+    .scenario-contrast {{
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .contrast-card {{
+      padding: 15px 16px;
+      border-radius: 18px;
+      background: var(--panel-strong);
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    .contrast-card strong {{
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }}
+    .contrast-card.bad strong {{ color: var(--red); }}
+    .contrast-card.good strong {{ color: var(--green); }}
+    .teaching {{
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.05);
+      background: rgba(255, 195, 90, 0.08);
+      color: #f4ddab;
+      line-height: 1.55;
+      font-size: 13px;
+    }}
+    .score-strip {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .score-card {{
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    .score-card.active {{
+      background: linear-gradient(135deg, rgba(95, 216, 255, 0.12), rgba(71, 229, 187, 0.08));
+      border-color: rgba(95, 216, 255, 0.3);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+    }}
+    .score-card .label {{
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 8px;
+    }}
+    .score-card .value {{
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }}
+    .good {{ color: var(--green); }}
+    .warn {{ color: var(--amber); }}
+    .bad {{ color: var(--red); }}
+    .monitor-grid {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
     }}
     .tile {{
@@ -472,7 +780,7 @@ def build_dashboard_html() -> str:
       border-radius: 18px;
       background: rgba(255,255,255,0.03);
       border: 1px solid rgba(255,255,255,0.06);
-      min-height: 96px;
+      min-height: 98px;
     }}
     .tile-label {{
       color: var(--muted);
@@ -493,9 +801,6 @@ def build_dashboard_html() -> str:
       font-size: 13px;
       color: #bed4f5;
     }}
-    .status-good {{ color: var(--green); }}
-    .status-warn {{ color: var(--amber); }}
-    .status-bad {{ color: var(--red); }}
     .trend-chart {{
       margin-top: 18px;
       padding: 16px;
@@ -528,16 +833,65 @@ def build_dashboard_html() -> str:
     .legend .spo2::before {{ background: var(--teal); }}
     .legend .hr::before {{ background: var(--cyan); }}
     .legend .reward::before {{ background: var(--amber); }}
+    .scrubber {{
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .scrubber-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }}
+    input[type="range"] {{
+      width: 100%;
+      accent-color: #4fd9ff;
+    }}
+    .frame-card {{
+      padding: 16px;
+      border-radius: 18px;
+      background: var(--panel-strong);
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    .frame-tool {{
+      font-size: 14px;
+      font-weight: 800;
+      margin-bottom: 8px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }}
+    .frame-message {{
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 13px;
+      margin-bottom: 10px;
+    }}
+    .frame-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }}
+    .pill {{
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 650;
+      background: rgba(255,255,255,0.05);
+      color: #dce9ff;
+    }}
     .log-list {{
       display: grid;
       gap: 10px;
-      margin-top: 2px;
-      max-height: 332px;
+      max-height: 410px;
       overflow: auto;
       padding-right: 6px;
     }}
     .log-item {{
-      padding: 14px 14px 12px;
+      padding: 14px;
       border-radius: 16px;
       background: rgba(255,255,255,0.03);
       border: 1px solid transparent;
@@ -570,65 +924,107 @@ def build_dashboard_html() -> str:
       line-height: 1.55;
       color: var(--muted);
     }}
-    .benchmarks {{
-      display: grid;
-      gap: 14px;
-    }}
-    .benchmark-row {{
-      display: grid;
-      grid-template-columns: 110px 1fr 64px;
-      gap: 12px;
-      align-items: center;
-    }}
-    .benchmark-label {{
-      font-size: 13px;
-      font-weight: 600;
-      color: #dbe7fb;
-    }}
-    .bar-track {{
-      position: relative;
-      height: 12px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.06);
-      overflow: hidden;
-    }}
-    .bar-fill {{
-      position: absolute;
-      inset: 0 auto 0 0;
-      border-radius: inherit;
-      width: 0%;
-      background: linear-gradient(90deg, var(--cyan), var(--teal));
-    }}
-    .bar-fill.bad {{
-      background: linear-gradient(90deg, #9a5cff, var(--red));
-    }}
-    .benchmark-value {{
-      text-align: right;
-      font-size: 13px;
-      font-variant-numeric: tabular-nums;
-    }}
-    .highlights {{
+    .runtime-grid {{
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
-      margin-top: 18px;
     }}
-    .highlight {{
+    .runtime-card {{
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    .runtime-card .label {{
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 8px;
+    }}
+    .runtime-card .value {{
+      font-size: 20px;
+      font-weight: 750;
+      letter-spacing: -0.02em;
+    }}
+    .tool-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .tool-card {{
       padding: 16px;
       border-radius: 18px;
-      background: rgba(8, 14, 27, 0.76);
-      border: 1px solid rgba(255,255,255,0.05);
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
     }}
-    .highlight-value {{
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: -0.03em;
-      margin-bottom: 4px;
+    .tool-card-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      margin-bottom: 8px;
     }}
-    .highlight-label {{
-      font-size: 13px;
+    .tool-card-title {{
+      font-size: 15px;
+      font-weight: 800;
+    }}
+    .tool-card-count {{
+      color: var(--cyan);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 800;
+    }}
+    .tool-card-copy {{
       color: var(--muted);
-      line-height: 1.4;
+      line-height: 1.55;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }}
+    .tool-chip-grid {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    .tool-chip {{
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(95, 216, 255, 0.08);
+      border: 1px solid rgba(95, 216, 255, 0.14);
+      color: #dcecff;
+      font-size: 12px;
+      font-family: "IBM Plex Mono", "Consolas", monospace;
+    }}
+    .matrix-wrapper {{
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(8, 14, 27, 0.76);
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 640px;
+    }}
+    th, td {{
+      padding: 14px 16px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      font-size: 13px;
+    }}
+    th {{
+      color: #dce7fb;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 12px;
+      background: rgba(255,255,255,0.03);
+    }}
+    td {{
+      color: var(--muted);
+    }}
+    td strong {{
+      color: var(--text);
     }}
     .footer-actions {{
       display: flex;
@@ -645,11 +1041,11 @@ def build_dashboard_html() -> str:
       font-weight: 700;
       font-size: 14px;
       text-decoration: none;
-      transition: transform 160ms ease, opacity 160ms ease;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 10px;
+      transition: transform 160ms ease;
     }}
     .btn:hover {{ transform: translateY(-1px); }}
     .btn.primary {{
@@ -667,17 +1063,22 @@ def build_dashboard_html() -> str:
       font-size: 13px;
       line-height: 1.55;
     }}
-    @media (max-width: 1100px) {{
-      .hero, .dashboard {{
+    @media (max-width: 1280px) {{
+      .hero, .main-grid {{
         grid-template-columns: 1fr;
       }}
     }}
-    @media (max-width: 720px) {{
-      .shell {{ width: min(100vw - 18px, 100%); margin: 10px auto 26px; }}
-      .hero-main, .hero-side, .section {{ padding: 18px; }}
-      .monitor-grid, .highlights {{ grid-template-columns: 1fr; }}
-      .benchmark-row {{ grid-template-columns: 92px 1fr 56px; }}
-      .tile-value {{ font-size: 24px; }}
+    @media (max-width: 880px) {{
+      .monitor-grid, .score-strip, .tool-grid, .layer-grid, .runtime-grid, .scenario-contrast {{
+        grid-template-columns: 1fr;
+      }}
+      .shell {{
+        width: min(100vw - 16px, 100%);
+        margin: 10px auto 24px;
+      }}
+      .hero-main, .hero-side, .section {{
+        padding: 18px;
+      }}
     }}
   </style>
 </head>
@@ -686,11 +1087,11 @@ def build_dashboard_html() -> str:
   <script>
     const initialPayload = {payload};
     let state = initialPayload;
+    let currentFrameIndex = 0;
 
-    function formatDelta(value, digits = 1) {{
-      if (value === null || value === undefined || Number.isNaN(value)) return "n/a";
+    function fmtSigned(value, digits = 2) {{
       const prefix = value > 0 ? "+" : "";
-      return `${{prefix}}${{value.toFixed(digits)}}`;
+      return `${{prefix}}${{Number(value).toFixed(digits)}}`;
     }}
 
     function formatSpo2(value) {{
@@ -709,32 +1110,30 @@ def build_dashboard_html() -> str:
     }}
 
     function metricStatus(kind, value) {{
-      if (value === null || value === undefined) return "status-warn";
-      if (kind === "spo2") return value < 0.9 ? "status-bad" : value < 0.95 ? "status-warn" : "status-good";
-      if (kind === "hr") return value > 120 ? "status-bad" : value > 100 ? "status-warn" : "status-good";
-      if (kind === "rr") return value > 28 ? "status-bad" : value > 20 ? "status-warn" : "status-good";
-      return "status-good";
+      if (value === null || value === undefined) return "warn";
+      if (kind === "spo2") return value < 0.9 ? "bad" : value < 0.95 ? "warn" : "good";
+      if (kind === "hr") return value > 120 ? "bad" : value > 100 ? "warn" : "good";
+      if (kind === "rr") return value > 28 ? "bad" : value > 20 ? "warn" : "good";
+      return "good";
     }}
 
     function buildChart(frames) {{
-      const width = 620;
-      const height = 220;
-      const pad = 20;
+      const width = 680;
+      const height = 240;
+      const pad = 24;
       const innerWidth = width - pad * 2;
       const innerHeight = height - pad * 2;
       const domainX = frames.map((f, idx) => idx);
       const hrValues = frames.map(f => f.heart_rate_bpm ?? 0);
       const spo2Values = frames.map(f => (f.spo2 ?? 0) * 100);
-      const rewardValues = frames.slice(1).map(f => f.reward ?? 0);
-
+      const rewardValues = frames.map(f => f.reward ?? 0);
       const xMax = Math.max(1, domainX[domainX.length - 1] || 1);
       const yMin = Math.min(...hrValues, ...spo2Values, ...rewardValues, 0);
       const yMax = Math.max(...hrValues, ...spo2Values, ...rewardValues, 120);
-
       const toX = (index) => pad + (index / xMax) * innerWidth;
       const toY = (value) => pad + innerHeight - ((value - yMin) / (yMax - yMin || 1)) * innerHeight;
       const poly = (values) => values.map((value, idx) => `${{toX(idx)}},${{toY(value)}}`).join(" ");
-
+      const focusX = toX(currentFrameIndex);
       return `
         <svg class="chart-svg" viewBox="0 0 ${{width}} ${{height}}" role="img" aria-label="Episode telemetry chart">
           <rect x="0" y="0" width="${{width}}" height="${{height}}" rx="18" fill="transparent"></rect>
@@ -742,59 +1141,144 @@ def build_dashboard_html() -> str:
           <line x1="${{pad}}" y1="${{pad}}" x2="${{pad}}" y2="${{height - pad}}" stroke="rgba(255,255,255,0.12)" />
           <polyline fill="none" stroke="#57d6ff" stroke-width="3" points="${{poly(hrValues)}}" />
           <polyline fill="none" stroke="#47e5bb" stroke-width="3" points="${{poly(spo2Values)}}" />
-          <polyline fill="none" stroke="#ffc35a" stroke-width="2.5" stroke-dasharray="8 7" points="${{poly([0, ...rewardValues])}}" />
+          <polyline fill="none" stroke="#ffc35a" stroke-width="2.5" stroke-dasharray="8 7" points="${{poly(rewardValues)}}" />
+          <line x1="${{focusX}}" y1="${{pad}}" x2="${{focusX}}" y2="${{height - pad}}" stroke="rgba(255,255,255,0.22)" stroke-dasharray="5 5" />
         </svg>
       `;
     }}
 
-    async function loadScenario(scenarioId) {{
-      const response = await fetch(`/space/api/dashboard?scenario_id=${{encodeURIComponent(scenarioId)}}`);
+    async function loadDashboard(scenarioId = state.selected_scenario, policyName = state.selected_policy) {{
+      const query = new URLSearchParams({{
+        scenario_id: scenarioId,
+        policy_name: policyName,
+      }});
+      const response = await fetch(`/space/api/dashboard?${{query.toString()}}`);
       if (!response.ok) {{
-        throw new Error(`Failed to load scenario: ${{scenarioId}}`);
+        throw new Error(`Failed to load dashboard state for ${{scenarioId}} / ${{policyName}}`);
       }}
       state = await response.json();
-      render(0);
+      currentFrameIndex = 0;
+      render();
     }}
 
-    function render(frameIndex = 0) {{
+    function render(frameIndex = currentFrameIndex) {{
+      currentFrameIndex = frameIndex;
       const root = document.getElementById("app");
       const payload = state;
       const demo = payload.demo_episode;
       const frames = demo.frames;
       const currentFrame = frames[Math.min(frameIndex, frames.length - 1)];
       const previousFrame = frames[Math.max(0, Math.min(frameIndex - 1, frames.length - 1))];
-      const policyRows = payload.policy_comparison.map((item) => {{
-        const normalized = Math.min(100, Math.max(6, ((item.value + 13) / 17) * 100));
-        return `
-          <div class="benchmark-row">
-            <div class="benchmark-label">${{item.label}}</div>
-            <div class="bar-track"><div class="bar-fill ${{item.status === "bad" ? "bad" : ""}}" style="width:${{normalized}}%"></div></div>
-            <div class="benchmark-value">${{item.value > 0 ? "+" : ""}}${{item.value.toFixed(2)}}</div>
-          </div>
-        `;
-      }}).join("");
-
-      const logItems = demo.action_log.map((item, idx) => `
-        <div class="log-item ${{idx + 1 === frameIndex ? "active" : ""}}">
-          <div class="log-head">
-            <div class="log-tool">${{idx + 1}}. ${{item.tool_name}}</div>
-            <div class="log-reward">${{item.reward > 0 ? "+" : ""}}${{item.reward.toFixed(3)}}</div>
-          </div>
-          <div class="log-message">${{item.message}}</div>
-        </div>
-      `).join("");
-
-      const highlights = payload.research_highlights.map((item) => `
-        <div class="highlight">
-          <div class="highlight-value">${{item.label}}</div>
-          <div class="highlight-label">${{item.value}}</div>
-        </div>
-      `).join("");
+      const selectedRow = payload.benchmark_matrix.find(row => row.scenario_id === payload.selected_scenario);
       const scenarioButtons = payload.available_scenarios.map((item) => `
         <button class="scenario-chip ${{item.id === payload.selected_scenario ? "active" : ""}}" data-scenario-id="${{item.id}}">
           ${{item.label}}
         </button>
       `).join("");
+      const policyButtons = payload.available_policies.map((item) => `
+        <button class="scenario-chip ${{item.id === payload.selected_policy ? "active" : ""}}" data-policy-id="${{item.id}}" title="${{item.summary}}">
+          ${{item.label}}
+        </button>
+      `).join("");
+      const selectedPolicyMeta = payload.available_policies.find(item => item.id === payload.selected_policy);
+      const scoreStrip = [
+        {{ label: "Expert", value: selectedRow.expert, selected: payload.selected_policy === "expert" }},
+        {{ label: "LLM Demo", value: selectedRow.llm_demo, selected: payload.selected_policy === "llm_demo" }},
+        {{ label: "Random", value: selectedRow.random, selected: payload.selected_policy === "random" }},
+        {{ label: "No Action", value: selectedRow.no_action, selected: payload.selected_policy === "no_action" }},
+      ].map(item => `
+        <div class="score-card ${{item.selected ? "active" : ""}}">
+          <div class="label">${{item.label}}</div>
+          <div class="value ${{item.value > 0 ? "good" : item.value > -2 ? "warn" : "bad"}}">${{fmtSigned(item.value, 3)}}</div>
+        </div>
+      `).join("");
+      const outcomeCards = payload.policy_outcome.map((item) => `
+        <div class="runtime-card">
+          <div class="label">${{item.label}}</div>
+          <div class="value">${{item.value}}</div>
+        </div>
+      `).join("");
+      const eventItems = (demo.events && demo.events.length ? demo.events : ["No retry or terminal events emitted in this trace."]).map((event) => `
+        <div class="log-item">
+          <div class="log-message">${{event}}</div>
+        </div>
+      `).join("");
+      const deltaCards = [
+        {{
+          label: "HR delta",
+          value: `${{fmtSigned((currentFrame.heart_rate_bpm ?? 0) - (previousFrame.heart_rate_bpm ?? currentFrame.heart_rate_bpm), 1)}} bpm`,
+        }},
+        {{
+          label: "SpO2 delta",
+          value: `${{fmtSigned(((currentFrame.spo2 ?? 0) - (previousFrame.spo2 ?? currentFrame.spo2)) * 100, 1)}} pts`,
+        }},
+        {{
+          label: "Blood volume delta",
+          value: `${{fmtSigned((currentFrame.blood_volume_ml ?? 0) - (previousFrame.blood_volume_ml ?? currentFrame.blood_volume_ml), 0)}} mL`,
+        }},
+        {{
+          label: "Step reward",
+          value: fmtSigned(currentFrame.reward ?? 0, 3),
+        }},
+      ].map((item) => `
+        <div class="runtime-card">
+          <div class="label">${{item.label}}</div>
+          <div class="value">${{item.value}}</div>
+        </div>
+      `).join("");
+      const logItems = demo.action_log.map((item, idx) => `
+        <div class="log-item ${{idx + 1 === frameIndex ? "active" : ""}}">
+          <div class="log-head">
+            <div class="log-tool">${{idx + 1}}. ${{item.tool_name}}</div>
+            <div class="log-reward">${{fmtSigned(item.reward, 3)}}</div>
+          </div>
+          <div class="log-message">${{item.message}}</div>
+        </div>
+      `).join("");
+      const benchmarkRows = payload.benchmark_matrix.map((row) => `
+        <tr>
+          <td><strong>${{row.label}}</strong></td>
+          <td class="${{row.expert > 0 ? "good" : "bad"}}">${{fmtSigned(row.expert, 3)}}</td>
+          <td class="${{row.llm_demo > 0 ? "good" : "bad"}}">${{fmtSigned(row.llm_demo, 3)}}</td>
+          <td class="${{row.random > 0 ? "good" : "bad"}}">${{fmtSigned(row.random, 3)}}</td>
+          <td class="${{row.no_action > 0 ? "good" : "bad"}}">${{fmtSigned(row.no_action, 3)}}</td>
+        </tr>
+      `).join("");
+      const toolGroups = payload.tool_surface.groups.map((group) => `
+        <div class="tool-card">
+          <div class="tool-card-head">
+            <div class="tool-card-title">${{group.name}}</div>
+            <div class="tool-card-count">${{group.tools.length}} tools</div>
+          </div>
+          <div class="tool-card-copy">${{group.summary}}</div>
+          <div class="tool-chip-grid">${{group.tools.map((tool) => `<span class="tool-chip">${{tool}}</span>`).join("")}}</div>
+        </div>
+      `).join("");
+      const layerCards = payload.engine_layers.map((layer) => `
+        <div class="layer-card">
+          <div class="layer-title">${{layer.title}}</div>
+          <div class="layer-value">${{layer.value}}</div>
+          <div class="layer-detail">${{layer.detail}}</div>
+        </div>
+      `).join("");
+      const runtimeCards = payload.runtime_profile.map((item) => `
+        <div class="runtime-card">
+          <div class="label">${{item.label}}</div>
+          <div class="value">${{item.value}}</div>
+        </div>
+      `).join("");
+      const frameSummary = `
+        <div class="frame-card">
+          <div class="frame-tool">${{currentFrame.tool_name}}</div>
+          <div class="frame-message">${{currentFrame.message}}</div>
+          <div class="frame-meta">
+            <span class="pill">step ${{currentFrame.step_index}}</span>
+            <span class="pill">reward ${{fmtSigned(currentFrame.reward, 3)}}</span>
+            <span class="pill">time ${{Math.round(currentFrame.sim_time_s)}}s</span>
+            <span class="pill">${{currentFrame.active_alerts.length}} alerts</span>
+          </div>
+        </div>
+      `;
 
       root.innerHTML = `
         <section class="hero">
@@ -806,51 +1290,75 @@ def build_dashboard_html() -> str:
             <div class="badge-row">${{payload.hero.badges.map((badge) => `<span class="badge">${{badge}}</span>`).join("")}}</div>
           </div>
           <div class="panel hero-side">
-            <span class="scenario-pill">${{payload.scenario.tag}}</span>
-            <h2 class="scenario-title">${{payload.scenario.title}}</h2>
-            <p class="scenario-copy">${{payload.scenario.summary}}</p>
-            <div class="scenario-selector">${{scenarioButtons}}</div>
-            <div class="scenario-contrast">
-              <div class="contrast-card bad">
-                <strong>Naive Path</strong>
-                <div>${{payload.scenario.naive_outcome}}</div>
-              </div>
-              <div class="contrast-card good">
-                <strong>Trained Path</strong>
-                <div>${{payload.scenario.trained_outcome}}</div>
-              </div>
-            </div>
-            <p class="scenario-copy"><strong style="color:var(--amber);text-transform:uppercase;font-size:11px;letter-spacing:0.14em;">Teaching Point</strong><br>${{payload.scenario.teaching_point}}</p>
+            <span class="section-label">Engine Stack</span>
+            <div class="layer-grid">${{layerCards}}</div>
           </div>
         </section>
 
-        <section class="dashboard">
+        <section class="main-grid">
           <div class="stack">
             <div class="panel section">
               <div class="section-header">
-                <h3 class="section-title">Patient Monitor</h3>
-                <div class="section-meta">${{demo.scenario_id.replace(/_/g, " ")}}</div>
+                <h2 class="section-title">Scenario Console</h2>
+                <div class="section-meta">${{payload.selected_scenario.replace(/_/g, " ")}}</div>
+              </div>
+              <div class="scenario-head">
+                <span class="section-label">${{payload.scenario.tag}}</span>
+                <h3 class="scenario-title">${{payload.scenario.title}}</h3>
+                <p class="scenario-copy">${{payload.scenario.summary}}</p>
+                <div class="scenario-selector">${{scenarioButtons}}</div>
+                <div class="section-meta" style="margin-top:12px;">Policy workbench</div>
+                <div class="scenario-selector">${{policyButtons}}</div>
+                <div class="microcopy" style="margin-top:12px;">${{selectedPolicyMeta.summary}}</div>
+              </div>
+              <div class="scenario-contrast">
+                <div class="contrast-card bad">
+                  <strong>No-treatment baseline</strong>
+                  <div>${{payload.scenario.naive_outcome}}</div>
+                </div>
+                <div class="contrast-card good">
+                  <strong>Expert benchmark</strong>
+                  <div>${{payload.scenario.trained_outcome}}</div>
+                </div>
+              </div>
+              <div class="microcopy">${{payload.scenario.selected_outcome}}</div>
+              <div class="teaching"><strong>Teaching point:</strong> ${{payload.scenario.teaching_point}}</div>
+              <div class="score-strip" style="margin-top:18px;">${{scoreStrip}}</div>
+
+              <div class="section-header" style="margin-top:22px;">
+                <h3 class="section-title">Patient State Inspector</h3>
+                <div class="section-meta">${{payload.selected_policy}} policy trace</div>
               </div>
               <div class="monitor-grid">
                 <div class="tile">
                   <div class="tile-label"><span>Heart Rate</span><span class="${{metricStatus("hr", currentFrame.heart_rate_bpm)}}">live</span></div>
                   <div class="tile-value ${{metricStatus("hr", currentFrame.heart_rate_bpm)}}">${{formatBpm(currentFrame.heart_rate_bpm)}}</div>
-                  <div class="tile-trend">delta ${{formatDelta((currentFrame.heart_rate_bpm ?? 0) - (previousFrame.heart_rate_bpm ?? currentFrame.heart_rate_bpm), 1)}}</div>
+                  <div class="tile-trend">delta ${{fmtSigned((currentFrame.heart_rate_bpm ?? 0) - (previousFrame.heart_rate_bpm ?? currentFrame.heart_rate_bpm), 1)}}</div>
                 </div>
                 <div class="tile">
-                  <div class="tile-label"><span>Blood Pressure</span><span class="status-good">perfusion</span></div>
+                  <div class="tile-label"><span>Blood Pressure</span><span>perfusion</span></div>
                   <div class="tile-value">${{formatBp(currentFrame.systolic_bp_mmhg, currentFrame.diastolic_bp_mmhg)}}</div>
                   <div class="tile-trend">time ${{Math.round(currentFrame.sim_time_s)}} s</div>
                 </div>
                 <div class="tile">
                   <div class="tile-label"><span>SpO2</span><span class="${{metricStatus("spo2", currentFrame.spo2)}}">oxygenation</span></div>
                   <div class="tile-value ${{metricStatus("spo2", currentFrame.spo2)}}">${{formatSpo2(currentFrame.spo2)}}</div>
-                  <div class="tile-trend">delta ${{formatDelta(((currentFrame.spo2 ?? 0) - (previousFrame.spo2 ?? currentFrame.spo2)) * 100, 1)}} pts</div>
+                  <div class="tile-trend">delta ${{fmtSigned(((currentFrame.spo2 ?? 0) - (previousFrame.spo2 ?? currentFrame.spo2)) * 100, 1)}} pts</div>
                 </div>
                 <div class="tile">
                   <div class="tile-label"><span>Respiratory Rate</span><span class="${{metricStatus("rr", currentFrame.respiration_rate_bpm)}}">ventilation</span></div>
                   <div class="tile-value ${{metricStatus("rr", currentFrame.respiration_rate_bpm)}}">${{formatBpm(currentFrame.respiration_rate_bpm)}}</div>
                   <div class="tile-trend">${{currentFrame.active_alerts.length ? currentFrame.active_alerts.join(" / ") : "no active alerts"}}</div>
+                </div>
+                <div class="tile">
+                  <div class="tile-label"><span>Blood Volume</span><span>circulation</span></div>
+                  <div class="tile-value">${{Math.round(currentFrame.blood_volume_ml ?? 0)}} mL</div>
+                  <div class="tile-trend">final frame uses current observation volume estimate</div>
+                </div>
+                <div class="tile">
+                  <div class="tile-label"><span>Mental Status</span><span>neuro</span></div>
+                  <div class="tile-value">${{currentFrame.mental_status || "n/a"}}</div>
+                  <div class="tile-trend">${{currentFrame.active_alerts.length}} active alert(s)</div>
                 </div>
               </div>
               <div class="trend-chart">
@@ -860,63 +1368,102 @@ def build_dashboard_html() -> str:
                   <span class="spo2">SpO2</span>
                   <span class="reward">Per-step reward</span>
                 </div>
+                <div class="scrubber">
+                  <div class="scrubber-head">
+                    <span>Frame scrubber</span>
+                    <span>frame ${{currentFrameIndex}} / ${{frames.length - 1}}</span>
+                  </div>
+                  <input id="frameScrubber" type="range" min="0" max="${{frames.length - 1}}" step="1" value="${{currentFrameIndex}}" />
+                </div>
               </div>
               <div class="footer-actions">
-                <button class="btn primary" id="runDemoBtn">Run Demo Episode</button>
+                <button class="btn primary" id="runDemoBtn">Run Replay</button>
                 <a class="btn secondary" href="${{payload.links.training_url}}" target="_blank" rel="noreferrer">View Training Code</a>
                 <a class="btn secondary" href="${{payload.links.repo_url}}" target="_blank" rel="noreferrer">GitHub Repo</a>
               </div>
               <div class="microcopy">
-                This replay uses the repo's deterministic mock backend with observation noise and time pressure enabled.
-                It is fast enough for a Space demo, but still shows the real policy ordering that matters.
+                This console is deliberately built around inspectable state rather than a single animation: you can switch scenarios and policies, scrub frames, inspect step deltas, and cross-check any trace against the benchmark matrix below.
               </div>
             </div>
 
             <div class="panel section">
               <div class="section-header">
-                <h3 class="section-title">Agent Action Log</h3>
-                <div class="section-meta">${{demo.policy_name}} policy</div>
+                <h3 class="section-title">Tool Contract Explorer</h3>
+                <div class="section-meta">${{payload.tool_surface.public_contract_count}} public / ${{payload.tool_surface.clinical_surface_count}} clinical / ${{payload.tool_surface.runtime_name_count}} runtime</div>
               </div>
-              <div class="log-list">${{logItems}}</div>
+              <div class="tool-grid">${{toolGroups}}</div>
+            </div>
+
+            <div class="panel section">
+              <div class="section-header">
+                <h3 class="section-title">Benchmark Matrix</h3>
+                <div class="section-meta">verified mock policy separation</div>
+              </div>
+              <div class="matrix-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Scenario</th>
+                      <th>Expert</th>
+                      <th>LLM Demo</th>
+                      <th>Random</th>
+                      <th>No Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>${{benchmarkRows}}</tbody>
+                </table>
+              </div>
             </div>
           </div>
 
           <div class="stack">
             <div class="panel section">
               <div class="section-header">
-                <h3 class="section-title">Benchmark Evidence</h3>
-                <div class="section-meta">verified mock ranking</div>
+                <h3 class="section-title">Step Inspector</h3>
+                <div class="section-meta">frame ${{currentFrameIndex}}</div>
               </div>
-              <div class="benchmarks">${{policyRows}}</div>
-              <div class="highlights">${{highlights}}</div>
+              ${{frameSummary}}
+              <div class="runtime-grid" style="margin-top:16px;">${{deltaCards}}</div>
+              <div class="log-list" style="margin-top:16px;">${{logItems}}</div>
             </div>
 
             <div class="panel section">
               <div class="section-header">
-                <h3 class="section-title">Episode Outcome</h3>
-                <div class="section-meta">${{demo.summary.termination_reason}}</div>
+                <h3 class="section-title">Policy Outcome</h3>
+                <div class="section-meta">${{payload.available_policies.find(item => item.id === payload.selected_policy).label}}</div>
               </div>
-              <div class="highlights">
-                <div class="highlight">
-                  <div class="highlight-value">${{demo.summary.total_reward > 0 ? "+" : ""}}${{demo.summary.total_reward}}</div>
-                  <div class="highlight-label">total reward on the demo episode</div>
-                </div>
-                <div class="highlight">
-                  <div class="highlight-value">${{demo.summary.spo2_percent}}%</div>
-                  <div class="highlight-label">final oxygen saturation after the expert sequence</div>
-                </div>
-                <div class="highlight">
-                  <div class="highlight-value">${{demo.summary.num_steps}}</div>
-                  <div class="highlight-label">actions before max-timestep cutoff</div>
-                </div>
-                <div class="highlight">
-                  <div class="highlight-value">${{demo.summary.mental_status}}</div>
-                  <div class="highlight-label">final mental status</div>
-                </div>
+              <div class="runtime-grid">${{outcomeCards}}</div>
+              <div class="log-list" style="margin-top:16px;">${{eventItems}}</div>
+            </div>
+
+            <div class="panel section">
+              <div class="section-header">
+                <h3 class="section-title">Runtime Profile</h3>
+                <div class="section-meta">selected replay settings</div>
+              </div>
+              <div class="runtime-grid">${{runtimeCards}}</div>
+              <div class="microcopy">
+                The Space uses the deterministic mock backend for responsiveness, but this panel exposes the same control dimensions the training and evaluation stack cares about: seed, noise, time pressure, and episode budget.
+              </div>
+            </div>
+
+            <div class="panel section">
+              <div class="section-header">
+                <h3 class="section-title">Environment Depth</h3>
+                <div class="section-meta">what this Space is surfacing</div>
+              </div>
+              <div class="highlights" style="margin-top:0;">
+                ${{
+                  payload.research_highlights.map((item) => `
+                    <div class="highlight">
+                      <div class="highlight-value">${{item.label}}</div>
+                      <div class="highlight-label">${{item.value}}</div>
+                    </div>
+                  `).join("")
+                }}
               </div>
               <div class="microcopy">
-                The right column is deliberately evidence-heavy: benchmark ordering, adversarial survival findings,
-                and a reproducible episode trace. The left column tells the clinical story in monitor form.
+                This is not just a replay shell. It exposes the public tool contract, the deeper clinical/runtime surfaces behind it, scenario-conditioned policy ranking, and the runtime settings that shape observed behavior.
               </div>
             </div>
           </div>
@@ -937,11 +1484,20 @@ def build_dashboard_html() -> str:
               return;
             }}
             runButton.disabled = false;
-            runButton.textContent = "Run Demo Episode";
+            runButton.textContent = "Run Replay";
           }};
           tick();
         }};
       }}
+
+      const scrubber = document.getElementById("frameScrubber");
+      if (scrubber) {{
+        scrubber.oninput = (event) => {{
+          const value = Number(event.target.value || 0);
+          render(value);
+        }};
+      }}
+
       document.querySelectorAll("[data-scenario-id]").forEach((button) => {{
         button.onclick = async () => {{
           const scenarioId = button.getAttribute("data-scenario-id");
@@ -949,7 +1505,21 @@ def build_dashboard_html() -> str:
             return;
           }}
           try {{
-            await loadScenario(scenarioId);
+            await loadDashboard(scenarioId, payload.selected_policy);
+          }} catch (error) {{
+            console.error(error);
+          }}
+        }};
+      }});
+
+      document.querySelectorAll("[data-policy-id]").forEach((button) => {{
+        button.onclick = async () => {{
+          const policyId = button.getAttribute("data-policy-id");
+          if (!policyId || policyId === payload.selected_policy) {{
+            return;
+          }}
+          try {{
+            await loadDashboard(payload.selected_scenario, policyId);
           }} catch (error) {{
             console.error(error);
           }}

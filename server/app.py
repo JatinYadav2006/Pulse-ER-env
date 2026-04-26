@@ -94,17 +94,17 @@ def serve_space_dashboard() -> HTMLResponse:
 
 
 @app.get("/space/api/dashboard", include_in_schema=False)
-def space_dashboard_payload(scenario_id: str | None = None) -> JSONResponse:
+def space_dashboard_payload(scenario_id: str | None = None, policy_name: str | None = None) -> JSONResponse:
     """Return the dashboard payload for lightweight client-side refreshes."""
 
-    return JSONResponse(get_dashboard_payload(scenario_id))
+    return JSONResponse(get_dashboard_payload(scenario_id, policy_name))
 
 
 @app.get("/space/api/demo", include_in_schema=False)
-def space_demo_episode(scenario_id: str | None = None) -> JSONResponse:
+def space_demo_episode(scenario_id: str | None = None, policy_name: str | None = None) -> JSONResponse:
     """Return the cached mock demo episode payload used by the Space UI."""
 
-    return JSONResponse(get_demo_episode_payload(scenario_id or "respiratory_distress"))
+    return JSONResponse(get_demo_episode_payload(scenario_id or "respiratory_distress", policy_name or "expert"))
 
 
 @app.get("/pathology/library")
