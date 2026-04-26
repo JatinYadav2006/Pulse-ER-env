@@ -44,7 +44,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PULSE_INSTALL_DIR=/app/engine-build/install \
-    PYTHONPATH=/app:/app/pulse_physiology_env
+    PYTHONPATH=/app
 
 WORKDIR /app
 
@@ -59,12 +59,12 @@ RUN apt-get update && \
       libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
-COPY pulse_physiology_env/server/requirements.txt /app/requirements.txt
+COPY server/requirements.txt /app/requirements.txt
 COPY engine/requirements.txt /app/engine-requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt -r /app/engine-requirements.txt protobuf==5.29.2
 
-COPY pulse_physiology_env /app/pulse_physiology_env
+COPY . /app
 COPY --from=pulse-builder /pulse /app/engine-build/install
 COPY engine-build/install/bin/states /app/engine-build/install/bin/states
 

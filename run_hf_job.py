@@ -52,7 +52,7 @@ echo "Step 3: patch async OpenEnv calls in trl_env.py if the remote branch is st
 python - <<'PY'
 from pathlib import Path
 
-path = Path("/workspace/Pulse-ER-env/pulse_physiology_env/trl_env.py")
+path = Path("/workspace/Pulse-ER-env/trl_env.py")
 text = path.read_text(encoding="utf-8")
 
 if "_run_client_call" not in text:
@@ -74,7 +74,7 @@ if "_run_client_call" not in text:
         + "\n"
         + "    @staticmethod\n"
         + "    def _run_client_call(awaitable):\n"
-        + '        """Bridge the async OpenEnv client into the sync TRL environment API."""\n'
+        + "        # Bridge the async OpenEnv client into the sync TRL environment API.\n"
         + "\n"
         + "        try:\n"
         + "            return asyncio.run(awaitable)\n"
@@ -105,7 +105,7 @@ else:
 PY
 
 echo "Step 4: install GRPO/training dependencies from fresh repo code"
-python -m pip install --no-cache-dir -e "$WORKDIR/pulse_physiology_env[training]" matplotlib jmespath
+python -m pip install --no-cache-dir -e "$WORKDIR[training]" matplotlib jmespath
 
 echo "Step 5: start Pulse server from latest repo code"
 python -m uvicorn pulse_physiology_env.server.app:app --host 127.0.0.1 --port 8000 >/tmp/pulse_server.log 2>&1 &

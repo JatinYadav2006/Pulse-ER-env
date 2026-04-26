@@ -1,12 +1,12 @@
-"""Compatibility shim for source-tree imports after flattening the repo layout."""
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
-from pathlib import Path
+"""Pulse Physiology Env package exports."""
 
-_ROOT = str(Path(__file__).resolve().parent.parent)
-if _ROOT not in __path__:
-    __path__.append(_ROOT)
-
-from .models import (  # type: ignore[attr-defined]
+from .models import (
     EnvironmentResponse,
     ObservationMetadata,
     PulsePhysiologyAction,
@@ -15,7 +15,7 @@ from .models import (  # type: ignore[attr-defined]
     ToolError,
     ToolResult,
 )
-from .patient_state import (  # type: ignore[attr-defined]
+from .patient_state import (
     ArterialBloodGasResult,
     BasicMetabolicPanelResult,
     CompleteBloodCountResult,
@@ -24,7 +24,7 @@ from .patient_state import (  # type: ignore[attr-defined]
     PatientState,
     ScenarioDifficulty,
 )
-from .tool_catalog import EXTENDED_TOOL_NAMES, INITIAL_TOOL_NAMES, KNOWN_TOOL_NAMES  # type: ignore[attr-defined]
+from .tool_catalog import EXTENDED_TOOL_NAMES, INITIAL_TOOL_NAMES, KNOWN_TOOL_NAMES
 
 __all__ = [
     "ArterialBloodGasResult",

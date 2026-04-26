@@ -1,3 +1,10 @@
+---
+title: Pulse-ER Environment
+emoji: 🩺
+colorFrom: green
+colorTo: blue
+---
+
 # Pulse-ER: Medical Trauma RL Environment
 
 Pulse-ER is a trauma-management reinforcement learning environment built on top of the Pulse physiology engine. The agent observes real patient state, chooses structured clinical tools, advances simulated time, and is rewarded for stabilizing the patient with the right sequencing of care.
@@ -8,11 +15,11 @@ Large language models can describe trauma care, but they are weak at acting unde
 
 ## What This Repo Contains
 
-- A real Pulse-backed trauma environment in [pulse_physiology_env/server/pulse_physiology_env_environment.py](./pulse_physiology_env/server/pulse_physiology_env_environment.py)
-- A mock backend for safe GRPO and regression work in [pulse_physiology_env/server/adapters.py](./pulse_physiology_env/server/adapters.py)
-- A frozen tool and observation contract in [pulse_physiology_env/tool_catalog.py](./pulse_physiology_env/tool_catalog.py) and [pulse_physiology_env/models.py](./pulse_physiology_env/models.py)
-- A reward engine with dense shaping, terminal outcome scoring, and anti-exploitation guards in [pulse_physiology_env/server/reward_engine.py](./pulse_physiology_env/server/reward_engine.py)
-- ATLS judging and monitor payloads for demo use in [pulse_physiology_env/server/atls_judge.py](./pulse_physiology_env/server/atls_judge.py) and [pulse_physiology_env/server/patient_monitor.py](./pulse_physiology_env/server/patient_monitor.py)
+- A real Pulse-backed trauma environment in [server/pulse_physiology_env_environment.py](./server/pulse_physiology_env_environment.py)
+- A mock backend for safe GRPO and regression work in [server/adapters.py](./server/adapters.py)
+- A frozen tool and observation contract in [tool_catalog.py](./tool_catalog.py) and [models.py](./models.py)
+- A reward engine with dense shaping, terminal outcome scoring, and anti-exploitation guards in [server/reward_engine.py](./server/reward_engine.py)
+- ATLS judging and monitor payloads for demo use in [server/atls_judge.py](./server/atls_judge.py) and [server/patient_monitor.py](./server/patient_monitor.py)
 
 ## Environment
 
@@ -64,10 +71,9 @@ The project currently supports:
 
 ## Quick Start
 
-Install the Python package from the environment folder:
+Install the Python package from the repo root:
 
 ```bash
-cd pulse_physiology_env
 pip install -e .
 ```
 
@@ -92,12 +98,12 @@ python -m pulse_physiology_env.run_mock_episode --backend mock --scenario respir
 
 ## Training and Demo Assets
 
-- Notebook: [notebooks/Pulse_ER_Quickstart.ipynb](./notebooks/Pulse_ER_Quickstart.ipynb)
-- Environment package README / Space-ready app config: [pulse_physiology_env/README.md](./pulse_physiology_env/README.md)
-- Demo walkthrough: [pulse_physiology_env/DEMO_SCRIPT.md](./pulse_physiology_env/DEMO_SCRIPT.md)
-- Integration checklist: [pulse_physiology_env/INTEGRATION_CHECKPOINT.md](./pulse_physiology_env/INTEGRATION_CHECKPOINT.md)
+- Demo walkthrough: [DEMO_SCRIPT.md](./DEMO_SCRIPT.md)
+- Integration checklist: [INTEGRATION_CHECKPOINT.md](./INTEGRATION_CHECKPOINT.md)
+- HF job launcher: [run_hf_job.py](./run_hf_job.py)
+- Spec: [SPEC.md](./SPEC.md)
 
-Public Hugging Face Space URL is not committed yet, but the repo already contains the Space-oriented app configuration and Docker path in the package folder.
+Public Hugging Face Space URL is not committed yet, but the repo already contains the Space-oriented app configuration and Docker path at the repo root.
 
 ## Real Runtime Status
 
@@ -116,22 +122,20 @@ The real Pulse runtime has already been swept end-to-end:
 ```text
 .
 ├── README.md
-├── docs/
-├── notebooks/
-├── pulse_physiology_env/
-│   ├── README.md
-│   ├── SPEC.md
-│   ├── models.py
-│   ├── patient_state.py
-│   ├── tool_catalog.py
-│   ├── real_backend.py
-│   └── server/
-│       ├── adapters.py
-│       ├── app.py
-│       ├── pulse_engine_adapter.py
-│       ├── pulse_physiology_env_environment.py
-│       ├── reward_engine.py
-│       └── tools.py
+├── pyproject.toml
+├── models.py
+├── patient_state.py
+├── tool_catalog.py
+├── real_backend.py
+├── train_grpo.py
+├── run_hf_job.py
+├── server/
+│   ├── adapters.py
+│   ├── app.py
+│   ├── pulse_engine_adapter.py
+│   ├── pulse_physiology_env_environment.py
+│   ├── reward_engine.py
+│   └── tools.py
 ├── engine/
 └── engine-build/
 ```
@@ -140,4 +144,4 @@ The real Pulse runtime has already been swept end-to-end:
 
 - The mock backend is the safe path for GRPO and notebook demos.
 - The real backend is wired to the local Pulse install for physiology-grounded execution.
-- The root README is submission-focused; the package README is implementation-focused.
+- The repo is now flattened at the root, with runtime/server code kept under `server/`.

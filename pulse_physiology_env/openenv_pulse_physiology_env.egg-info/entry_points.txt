@@ -1,2 +1,0 @@
-[console_scripts]
-server = pulse_physiology_env.server.app:main
