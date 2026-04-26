@@ -12,6 +12,7 @@ venv/
 *.egg-info/
 # Generated trajectory/demo artifacts
 pulse_physiology_env/artifacts/
+artifacts/
 
 # Python cache
 __pycache__/
