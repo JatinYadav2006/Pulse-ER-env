@@ -1,22 +1,20 @@
----
-title: Pulse-ER
-emoji: "🫀"
-colorFrom: red
-colorTo: blue
-sdk: docker
-app_port: 8000
-tags:
-  - openenv
-  - reinforcement-learning
-  - physiology
-  - trauma-medicine
-  - grpo
-pinned: true
----
+# 🫀 Pulse-ER
 
-# Pulse-ER — Emergency Response Training Environment
+Research-grade reinforcement learning environment for trauma patient management built on the Pulse Physiology Engine.
+
+🏆 Meta × Hugging Face Hackathon 2026 Finalist
+📈 25× reward improvement over random baseline
+🧠 GRPO + LoRA fine-tuned Qwen2.5-3B for ATLS-aligned trauma protocol learning
+🏥 64 clinical interventions across 20 patient profiles
+
+# Overview
 
 *A physiologically-validated reinforcement learning environment for training agents to manage critical trauma patients during the golden hour of emergency medicine.*
+
+![Python](https://img.shields.io/badge/Python-3.10+-blue?style=flat&logo=python)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.x-orange?style=flat&logo=pytorch)
+![HuggingFace](https://img.shields.io/badge/HuggingFace-TRL-yellow?style=flat&logo=huggingface)
+![License](https://img.shields.io/badge/License-MIT-yellow?style=flat)
 
 `64 clinical tools` · `20 patient profiles` · `Pulse 4.3.2 validated`
 
